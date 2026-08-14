@@ -83,6 +83,18 @@ def _publish_container(container_id: str) -> str:
     return resp.json()["id"]
 
 
+def get_reel_permalink(media_id: str) -> str:
+    """Return the public instagram.com URL for a published media item."""
+    resp = requests.get(
+        f"{BASE_URL}/{media_id}",
+        params={"fields": "permalink"},
+        headers=_AUTH_HEADERS,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()["permalink"]
+
+
 def publish_reel(video_public_url: str, caption: str) -> str:
     """Upload and publish a Reel. Returns the published media ID.
 

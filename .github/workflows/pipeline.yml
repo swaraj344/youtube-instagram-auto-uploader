@@ -15,14 +15,24 @@ on:
     - cron: "0 8 * * *"
     # Publish check: every 15 minutes, all day
     - cron: "*/15 * * * *"
+    # Daily Meta token expiry check: 9:00 AM IST = 3:30 AM UTC
+    - cron: "30 3 * * *"
 
-  # Manual trigger — lets you test uploads or force a publish check from the Actions tab
+  # Manual trigger — used by the Actions tab and the Telegram bot
   workflow_dispatch:
     inputs:
       slot:
         description: "Upload slot to run (A or B). Leave blank to run only the publish check."
         required: false
         default: ""
+      force_next:
+        description: "Set to 'true' to publish the next queued video immediately (ignores schedule)."
+        required: false
+        default: ""
+
+env:
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
 jobs:
   run-pipeline:
@@ -102,11 +112,28 @@ jobs:
       - name: Run publish check
         if: >
           github.event.schedule == '*/15 * * * *' ||
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.slot == '')
+          (github.event_name == 'workflow_dispatch' &&
+           github.event.inputs.slot == '' &&
+           github.event.inputs.force_next != 'true')
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
         run: python publish_scheduled.py
+
+      # --- Forced publish (Telegram /publishnow) ---
+      - name: Run forced publish of next queued video
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.force_next == 'true'
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
+        run: python publish_scheduled.py --force-next
+
+      # --- Daily Meta token expiry warning (Telegram) ---
+      - name: Check Meta token expiry
+        if: github.event.schedule == '30 3 * * *'
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+        run: python check_token_expiry.py
 
       # Commit updated state back to repo with retry loop to handle push conflicts
       # from concurrent runs (the 15-min publish check and a slot upload can overlap).

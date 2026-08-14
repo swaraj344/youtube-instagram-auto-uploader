@@ -27,6 +27,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 from auth import get_credentials
 from metadata_generator import generate_metadata
+from telegram_notifier import notify
 from utils import load_json, save_json
 
 load_dotenv()
@@ -217,6 +218,13 @@ def main() -> None:
         log["processed_file_ids"].append(next_video["id"])
         save_json(LOG_FILE, log)
 
+        notify(
+            f"📤 <b>Queued for slot {args.slot}</b>\n"
+            f"🎬 {metadata['title']}\n"
+            f"👀 Preview (unlisted): https://youtu.be/{video_id}\n"
+            f"🕒 Goes live: {go_live_at.strftime('%d %b, %I:%M %p')}"
+        )
+
     finally:
         # Always clean up the temp file, even if an exception was raised above.
         if os.path.exists(local_path):
@@ -227,4 +235,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        notify(f"🔴 <b>Upload run crashed</b>: {exc}")
+        raise

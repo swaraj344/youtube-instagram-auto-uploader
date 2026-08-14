@@ -12,6 +12,7 @@ whose go_live_at time has arrived, then:
     python publish_scheduled.py
 """
 
+import argparse
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -20,7 +21,8 @@ from dotenv import load_dotenv
 from googleapiclient.discovery import build
 
 from auth import get_credentials
-from instagram_uploader import publish_reel
+from instagram_uploader import get_reel_permalink, publish_reel
+from telegram_notifier import notify
 from utils import load_json, save_json
 
 load_dotenv()
@@ -79,6 +81,23 @@ def revoke_drive_public_access(drive, file_id: str) -> None:
 # Queue helpers
 # ---------------------------------------------------------------------------
 
+def select_due(queue: list[dict], now: datetime, force_next: bool = False) -> list[dict]:
+    """Pick the queue items to publish on this run.
+
+    Normal mode: every unpublished item whose go_live_at has passed.
+    force_next: the single earliest unpublished item, schedule ignored
+    (backs the Telegram /publishnow command).
+    """
+    unpublished = [item for item in queue if not item.get("published")]
+    if force_next:
+        unpublished.sort(key=lambda item: datetime.fromisoformat(item["go_live_at"]))
+        return unpublished[:1]
+    return [
+        item for item in unpublished
+        if datetime.fromisoformat(item["go_live_at"]) <= now
+    ]
+
+
 def prune_queue(queue: list[dict]) -> list[dict]:
     """Remove published entries older than QUEUE_PRUNE_DAYS to keep file bounded."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=QUEUE_PRUNE_DAYS)
@@ -101,17 +120,23 @@ def prune_queue(queue: list[dict]) -> list[dict]:
 def main() -> None:
     from zoneinfo import ZoneInfo
 
+    parser = argparse.ArgumentParser(description="Publish queued videos whose time has come.")
+    parser.add_argument(
+        "--force-next",
+        action="store_true",
+        help="Publish the earliest queued video immediately, ignoring its schedule.",
+    )
+    args = parser.parse_args()
+
     tz = ZoneInfo(TIMEZONE_STR)
     now = datetime.now(tz)
 
     queue = load_json(QUEUE_FILE, [])
-    due = [
-        item for item in queue
-        if not item.get("published")
-        and datetime.fromisoformat(item["go_live_at"]) <= now
-    ]
+    due = select_due(queue, now, force_next=args.force_next)
 
     if not due:
+        if args.force_next:
+            notify("📭 Nothing in the queue to force-publish.")
         logger.info("Nothing due yet.")
         return
 
@@ -135,8 +160,19 @@ def main() -> None:
             logger.error(
                 "  Instagram publish FAILED (YouTube still went public): %s", exc
             )
+            # Notify only on the first failure of this item — it retries on
+            # every subsequent run, and a broken token would otherwise spam
+            # a message every 15 minutes.
+            if not item.get("failure_notified"):
+                notify(
+                    f"🔴 <b>Instagram publish failed</b> (slot {item['slot']}).\n"
+                    f"YouTube is already public: https://youtu.be/{yt_id}\n"
+                    f"Error: {exc}\n"
+                    "It will retry on the next scheduled check."
+                )
+                item["failure_notified"] = True
             # Continue processing other items; don't mark as published so it
-            # can be retried manually.
+            # is retried on the next run.
             continue
 
         # Revoke Drive public access now that Instagram has fetched the video
@@ -145,6 +181,17 @@ def main() -> None:
 
         item["published"] = True
 
+        try:
+            ig_link = get_reel_permalink(ig_media_id)
+        except Exception as exc:
+            logger.warning("  Could not fetch Reel permalink: %s", exc)
+            ig_link = None
+        notify(
+            f"🟢 <b>Video live</b> (slot {item['slot']})\n"
+            f"▶️ YouTube: https://youtu.be/{yt_id}\n"
+            f"📸 Instagram: {ig_link or f'published (media {ig_media_id})'}"
+        )
+
     # Prune old entries and persist
     queue = prune_queue(queue)
     save_json(QUEUE_FILE, queue)
@@ -152,4 +199,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        notify(f"🔴 <b>Publish run crashed</b>: {exc}")
+        raise

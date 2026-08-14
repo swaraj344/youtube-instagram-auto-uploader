@@ -155,6 +155,29 @@ repo so the next run remembers what's already been done.
 **5. Manual testing**: GitHub repo → Actions tab → "PoddyGo Pipeline" → "Run workflow"
 button — triggers an on-demand run without waiting for the schedule.
 
+## Telegram bot (optional): notifications + remote control
+
+With two extra secrets the pipeline talks to you on Telegram and takes commands:
+
+**Notifications** — video queued (with unlisted preview link), video live (with
+YouTube + Instagram links), failures, and a daily warning during the Meta
+token's final week.
+
+**Commands** (checked every 5 min by `.github/workflows/telegram-bot.yml`):
+
+| Command | Does |
+|---|---|
+| `/status` | Videos left in Drive, queued items, Meta token days remaining |
+| `/upload A` / `/upload B` | Queue the next video for a slot right now |
+| `/publish` | Publish anything whose scheduled time has passed |
+| `/publishnow` | Publish the next queued video immediately, ignoring schedule |
+
+Setup: message @BotFather → `/newbot` → copy the token. Send your new bot any
+message, then fetch your chat ID from `https://api.telegram.org/bot<TOKEN>/getUpdates`
+(the `message.chat.id` field). Put both in `.env` and in two GitHub secrets:
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. The bot ignores everyone except
+that chat ID. Without these secrets everything runs exactly as before.
+
 ### Two expiry dates to track
 
 - **Google refresh token expires in 7 days** unless the OAuth app is moved out of
