@@ -62,12 +62,25 @@ TEMP_DIR = "temp_downloads"
 
 def list_drive_videos(drive, folder_id: str) -> list[dict]:
     query = f"'{folder_id}' in parents and trashed = false"
-    results = (
-        drive.files()
-        .list(q=query, fields="files(id, name, mimeType)", orderBy="name", pageSize=1000)
-        .execute()
-    )
-    return [f for f in results.get("files", []) if f["mimeType"].startswith("video/")]
+    files: list[dict] = []
+    page_token = None
+    while True:
+        results = (
+            drive.files()
+            .list(
+                q=query,
+                fields="nextPageToken, files(id, name, mimeType)",
+                orderBy="name",
+                pageSize=1000,
+                pageToken=page_token,
+            )
+            .execute()
+        )
+        files.extend(results.get("files", []))
+        page_token = results.get("nextPageToken")
+        if not page_token:
+            break
+    return [f for f in files if f["mimeType"].startswith("video/")]
 
 
 def make_shareable(drive, file_id: str) -> str:
