@@ -3,6 +3,9 @@
 client_secret.json
 token.json
 
+# Local channel secrets + deploy fingerprints (managed by the config web app)
+secrets/
+
 # Python environment
 venv/
 __pycache__/

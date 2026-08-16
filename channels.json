@@ -1,0 +1,14 @@
+{
+  "channels": [
+    {
+      "slug": "study",
+      "display_name": "Study Motivation",
+      "enabled": true,
+      "timezone": "Asia/Kolkata",
+      "slots": ["17:30", "21:30"],
+      "upload_lead_hours": 8,
+      "content_description": "study motivation short videos targeting a student audience",
+      "youtube_category_id": "22"
+    }
+  ]
+}
