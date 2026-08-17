@@ -14,8 +14,11 @@ tools, no server to maintain, no laptop that needs to stay on.
 Videos sit in a Google Drive folder. This pipeline picks them one at a
 time, generates title/description/tags/caption with Groq, and publishes to
 **YouTube (unlisted → public)** and **Instagram Reels** at the same moment,
-twice a day. Works for any video content — podcast clips, gaming highlights,
-tutorials, vlogs — just set `CONTENT_DESCRIPTION` in `.env` to match yours.
+on the slots you configure. It supports **multiple independent channels** —
+each with its own Drive folder, YouTube channel, Instagram account, slot
+times, and content description — all managed visually with a local web app
+(`python -m webapp`). Works for any video content: podcast clips, gaming
+highlights, tutorials, vlogs.
 
 ## Quick start
 
@@ -30,27 +33,57 @@ tutorials, vlogs — just set `CONTENT_DESCRIPTION` in `.env` to match yours.
 
 Full setup walkthrough below if you want the details on each step.
 
-## Why two scripts
+## How the pipeline runs
 
 YouTube's `publishAt` scheduling only works if the video is `private` at
 upload time — it doesn't support "unlisted + auto-publish later." Instagram
 has no scheduling in its API at all — calling publish makes it go live
-immediately. So the pipeline is split in two:
+immediately. So publishing happens in two steps, both driven by one
+self-scheduling dispatcher:
 
-| Script | Runs | Does |
+| Piece | Runs | Does |
 |---|---|---|
-| `upload_unlisted.py` | 8 hours before a slot | Picks next video, generates metadata, uploads to YouTube as **unlisted** |
-| `publish_scheduled.py` | Every 10-15 min (checks the clock) | At the exact slot time: flips YouTube to **public** AND posts the same video to **Instagram Reels** |
+| `run_pipeline.py` | Every 15 min via GitHub Actions | Per enabled channel, decides which of the two steps below are due and runs them |
+| upload step (`uploader.py`) | When a slot's lead window opens (go-live minus `upload_lead_hours`, default 8h) | Picks the channel's next Drive video, generates metadata, uploads to YouTube as **unlisted** |
+| publish step (`publisher.py`) | At the exact slot time | Flips YouTube to **public** AND posts the same video to **Instagram Reels** |
 
-This gives you: video sits unlisted (link-shareable, not searchable) for 8
-hours, then goes public on YouTube and drops on Instagram simultaneously.
+This gives you: video sits unlisted (link-shareable, not searchable) for
+`upload_lead_hours`, then goes public on YouTube and drops on Instagram
+simultaneously. Slot times live in `channels.json`, so changing them never
+touches workflow YAML.
 
-## Default daily slots (edit in `.env`)
+## Multi-channel configuration
 
-- **Slot A: 5:30 PM IST** = 8:00 AM ET = 1:00 PM UK — US morning commute, UK lunch
-- **Slot B: 9:30 PM IST** = 12:00 PM ET = 5:00 PM UK — US lunch, UK evening commute
+Each channel is an independent niche: its own Drive folder → its own YouTube
+channel → its own Instagram account, with its own go-live slots.
 
-That's 2 videos/day, published simultaneously to both platforms.
+- Non-secret config: `channels.json` (committed).
+- Per-channel secrets (Drive folder ID, IG account ID, Google token): the
+  `CHANNELS_SECRETS_JSON` GitHub secret — locally `secrets/channels_secrets.json`
+  (gitignored).
+- Shared secrets (one for all channels): `META_ACCESS_TOKEN`, `GROQ_API_KEY`,
+  `TELEGRAM_*`.
+
+Configure visually with the local web app:
+
+```bash
+pip install -r requirements-webapp.txt
+python -m webapp        # opens http://127.0.0.1:5001
+```
+
+The app shows a per-channel dashboard (queue, next slots, token health),
+edits everything locally, runs the YouTube OAuth flow per channel, picks IG
+accounts live from the Graph API, and triggers manual uploads/publishes. The
+**Deploy** button commits `channels.json` and updates the GitHub secrets
+(needs the `gh` CLI logged in).
+
+Manual CLI equivalents:
+
+```bash
+python run_pipeline.py                                # what CI runs every 15 min
+python run_pipeline.py --channel study --upload-slot 17:30
+python run_pipeline.py --channel study --force-next
+```
 
 ## One-time setup
 
@@ -100,28 +133,31 @@ python oauth_setup.py
 
 ### 5. Configure
 
-Copy `.env.example` to `.env` and fill in:
-- `DRIVE_FOLDER_ID`
-- `GROQ_API_KEY`
-- `SLOT_A_TIME` / `SLOT_B_TIME` (defaults already set)
-- `META_ACCESS_TOKEN` / `IG_BUSINESS_ACCOUNT_ID`
+Copy `.env.example` to `.env` and fill in the shared secrets
+(`GROQ_API_KEY`, `META_ACCESS_TOKEN`, optional `TELEGRAM_*`). Then run the
+config web app and set up your channel(s) — Drive folder, IG account, slots,
+YouTube connection:
+
+```bash
+pip install -r requirements-webapp.txt
+python -m webapp
+```
+
+(Coming from the old single-channel setup? The dashboard offers a one-click
+**Import** that builds the channel secrets from your existing `.env` +
+`token.json`.)
 
 ### 6. Run
 
-Queue a video for slot A (run this ~8 hours before 5:30 PM IST, e.g. 9:30 AM):
+One command does everything that's due right now (uploads whose lead window
+has opened, publishes whose slot time has arrived):
+
 ```bash
-python upload_unlisted.py --slot A
+python run_pipeline.py
 ```
 
-Queue a video for slot B (run ~8 hours before 9:30 PM IST, e.g. 1:30 PM):
-```bash
-python upload_unlisted.py --slot B
-```
-
-Then keep this running on a schedule so queued videos actually go live:
-```bash
-python publish_scheduled.py
-```
+Keep it running on a schedule (GitHub Actions does this for you — next
+section) so queued videos actually go live.
 
 ## Automating: runs in the cloud via GitHub Actions (no laptop needed)
 
@@ -133,24 +169,22 @@ keeps `.env`, `client_secret.json`, and `token.json` out of the repo — those a
 secrets and should never be committed.
 
 **2. Secrets are stored in GitHub → Settings → Secrets and variables → Actions**,
-encrypted, one per value:
-- `DRIVE_FOLDER_ID`
+encrypted (the web app's **Deploy** button manages these for you):
+- `CHANNELS_SECRETS_JSON` — per-channel secrets blob (Drive folder ID, IG
+  account ID, Google token per channel)
 - `GROQ_API_KEY`
 - `META_ACCESS_TOKEN`
-- `IG_BUSINESS_ACCOUNT_ID`
-- `GOOGLE_CLIENT_SECRET_JSON` — the full contents of your local `client_secret.json`
-- `GOOGLE_TOKEN_JSON` — the full contents of your local `token.json`
+- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` (optional)
 
 **3. `.github/workflows/pipeline.yml`** is the automation itself. On each scheduled
-run, it: checks out the repo → installs dependencies → rebuilds `client_secret.json`
-and `token.json` from the two secrets above → runs the right script for that time
-slot → commits the updated `processed_log.json`/`publish_queue.json` back to the
-repo so the next run remembers what's already been done.
+run, it: checks out the repo → installs dependencies → runs
+`python run_pipeline.py`, which loops every enabled channel and does whatever
+is due → commits the updated `state/<channel>/` files back to the repo so the
+next run remembers what's already been done.
 
-**4. Three schedules** (cron times are UTC, converted from IST):
-- Slot A upload: `0 4 * * *` (9:30 AM IST)
-- Slot B upload: `0 8 * * *` (1:30 PM IST)
-- Publish check: `*/15 * * * *` (every 15 min, all day)
+**4. Two schedules** (cron times are UTC):
+- Pipeline pass: `*/15 * * * *` (every 15 min — uploads AND publishes)
+- Meta token expiry check: `30 3 * * *` (9:00 AM IST, Telegram warning in the final week)
 
 **5. Manual testing**: GitHub repo → Actions tab → "PoddyGo Pipeline" → "Run workflow"
 button — triggers an on-demand run without waiting for the schedule.
@@ -167,10 +201,10 @@ token's final week.
 
 | Command | Does |
 |---|---|
-| `/status` | Videos left in Drive, queued items, Meta token days remaining |
-| `/upload A` / `/upload B` | Queue the next video for a slot right now |
-| `/publish` | Publish anything whose scheduled time has passed |
-| `/publishnow` | Publish the next queued video immediately, ignoring schedule |
+| `/status` | Every channel: videos left in Drive, queued items; plus Meta token days remaining |
+| `/upload [channel] [HH:MM]` | Queue the channel's next video for a slot right now (channel optional when only one is enabled) |
+| `/publish` | Publish anything whose scheduled time has passed (all channels) |
+| `/publishnow [channel]` | Publish the channel's next queued video immediately, ignoring schedule |
 
 Setup: message @BotFather → `/newbot` → copy the token. Send your new bot any
 message, then fetch your chat ID from `https://api.telegram.org/bot<TOKEN>/getUpdates`
@@ -190,10 +224,17 @@ that chat ID. Without these secrets everything runs exactly as before.
 
 ## Notes
 
-- YouTube free quota: ~6 uploads/day (10,000 units, ~1,600/upload) — 2/day is well within it.
+- YouTube free quota: ~6 uploads/day **per Google Cloud project** (10,000
+  units, ~1,600/upload) — that's roughly 3 channels × 2 slots. Channel 4+
+  needs its own GCP project: set the channel's `google_client_secret` in the
+  secrets blob (the config schema already supports it) and connect YouTube
+  through that project.
+- One Meta app + one `META_ACCESS_TOKEN` covers every IG account linked to
+  your Facebook login — only the per-channel IG account ID differs.
 - Instagram fetches the video from the Drive shareable link server-side — that link
-  is created automatically by `upload_unlisted.py` (`anyone with link, viewer` permission).
-- `publish_queue.json` tracks what's waiting to go live; `processed_log.json` tracks
-  what's already been picked from Drive so nothing gets uploaded twice.
+  is created automatically by the upload step (`anyone with link, viewer` permission).
+- `state/<channel>/publish_queue.json` tracks what's waiting to go live;
+  `state/<channel>/processed_log.json` tracks what's already been picked from
+  Drive so nothing gets uploaded twice.
 - If Instagram publish fails but YouTube succeeded, the script logs it and continues —
   check the console output and retry manually if needed.
