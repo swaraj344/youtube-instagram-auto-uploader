@@ -1,0 +1,38 @@
+{
+  "sources": [
+    {
+      "id": "study-drive",
+      "name": "Study Motivation (Drive)"
+    }
+  ],
+  "youtube": [
+    {
+      "id": "study-yt",
+      "name": "Study Motivation",
+      "source": "study-drive",
+      "enabled": true,
+      "timezone": "Asia/Kolkata",
+      "slots": [
+        "17:30",
+        "21:30"
+      ],
+      "upload_lead_hours": 8,
+      "content_description": "study motivation short videos targeting a student audience",
+      "category_id": "22"
+    }
+  ],
+  "instagram": [
+    {
+      "id": "casual-ig",
+      "name": "Study Motivation",
+      "source": "study-drive",
+      "enabled": true,
+      "timezone": "Asia/Kolkata",
+      "slots": [
+        "17:30",
+        "21:30"
+      ],
+      "content_description": "study motivation short videos targeting a student audience"
+    }
+  ]
+}
