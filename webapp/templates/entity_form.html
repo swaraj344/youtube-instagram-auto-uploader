@@ -17,6 +17,11 @@
       <input name="drive_folder_id" class="mono"
              value="{{ form.get('drive_folder_id', e.drive_folder_id if editing else '') }}">
     </label>
+    {% if not editing %}
+      <p class="dim">Don't have a Drive folder yet? Leave it empty. After
+         saving you'll get buttons to connect Google and upload videos from
+         a local folder — a Drive folder is created automatically.</p>
+    {% endif %}
   {% else %}
     <label>Source
       <select name="source" required>
