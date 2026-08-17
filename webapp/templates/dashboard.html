@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+{% if pull_error %}<p class="flash error">git pull failed: {{ pull_error }}</p>{% endif %}
+{% if not deploy.clean %}
+  <div class="banner">
+    Local changes not yet on GitHub
+    {%- if deploy.config_dirty %} · channels.json{% endif %}
+    {%- if deploy.secrets_changed %} · channel secrets{% endif %}
+    {%- for k in deploy.shared_changed %} · {{ k }}{% endfor %} —
+    <a href="{{ url_for('deploy_preview') }}">review &amp; deploy</a>
+  </div>
+{% endif %}
+{% if legacy %}
+  <div class="banner">
+    Legacy single-channel setup detected (.env + token.json).
+    <form class="inline" method="post" action="{{ url_for('legacy_import') }}">
+      <button type="submit">Import into channel secrets</button>
+    </form>
+  </div>
+{% endif %}
+
+<p class="meta">
+  {% if meta_days is not none %}🔑 Meta token: {{ '%.0f' % meta_days }} days left
+  {% else %}🔑 Meta token: status unknown{% endif %}
+</p>
+
+<div class="cards">
+{% for row in channels %}
+  {% set ch = row.ch %}
+  <section class="card {{ 'paused' if not ch.enabled }}">
+    <h2>{{ ch.display_name }} <span class="slug">{{ ch.slug }}</span>
+      {% if not ch.enabled %}<span class="badge">paused</span>{% endif %}
+      {% if not row.has_secrets %}<span class="badge warn">secrets missing</span>{% endif %}
+    </h2>
+    <p>Slots: <span class="mono">{{ ch.slots|join(' · ') }}</span>
+       {% if row.next_slot %} — next live <span class="mono">{{ row.next_slot.strftime('%d %b %H:%M') }}</span>{% endif %}</p>
+
+    {% if row.pending %}
+      <ul class="queue">
+      {% for item in row.pending %}
+        <li>📋 <span class="mono">{{ item.slot }}</span> → <span class="mono">{{ item.go_live_at }}</span>
+            <a href="https://youtu.be/{{ item.youtube_video_id }}">preview</a></li>
+      {% endfor %}
+      </ul>
+    {% else %}<p class="dim">Nothing queued.</p>{% endif %}
+
+    {% if row.recent %}
+      <ul class="queue dim">
+      {% for item in row.recent %}<li>🟢 <span class="mono">{{ item.slot }}</span> · went live <span class="mono">{{ item.go_live_at }}</span></li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="actions">
+      <form class="inline" method="post" action="{{ url_for('channel_action', slug=ch.slug) }}">
+        <input type="hidden" name="action" value="upload">
+        <select name="upload_slot">
+          {% for s in ch.slots %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+        </select>
+        <button type="submit">Upload now</button>
+      </form>
+      <form class="inline" method="post" action="{{ url_for('channel_action', slug=ch.slug) }}">
+        <input type="hidden" name="action" value="publishnow">
+        <button type="submit">Publish next now</button>
+      </form>
+      <a class="btn" href="{{ url_for('edit_channel', slug=ch.slug) }}">Edit</a>
+      <form class="inline" method="post" action="{{ url_for('toggle_channel', slug=ch.slug) }}">
+        <button type="submit">{{ 'Resume' if not ch.enabled else 'Pause' }}</button>
+      </form>
+      <form class="inline" method="post" action="{{ url_for('delete_channel', slug=ch.slug) }}"
+            onsubmit="return confirm('Remove channel {{ ch.slug }}? State files stay on disk.')">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    </div>
+  </section>
+{% else %}
+  <p>No channels yet — <a href="{{ url_for('new_channel') }}">add one</a>.</p>
+{% endfor %}
+</div>
+{% endblock %}

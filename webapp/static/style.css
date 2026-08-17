@@ -1,0 +1,88 @@
+/* Local config console for the multi-channel uploader.
+   Palette: warm paper surfaces, ink text, "record red" for the on-air /
+   deploy moments, green only for things that actually went live.
+   Slot times and IDs are the core data — they get the mono treatment. */
+
+:root {
+  --bg: #f7f5f2;        /* warm paper */
+  --card: #fffdfa;
+  --ink: #23272b;
+  --dim: #75726c;
+  --accent: #c92a2a;    /* record red */
+  --ok: #2f9e44;
+  --warn: #e8590c;
+  --line: #e6e2dc;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 15px/1.5 -apple-system, "Segoe UI", sans-serif; }
+
+header { display: flex; align-items: center; gap: 1.5rem;
+         padding: .75rem 1.5rem; background: var(--card);
+         border-bottom: 1px solid var(--line); }
+.brand { font-weight: 700; letter-spacing: .01em; text-decoration: none;
+         color: var(--ink); display: inline-flex; align-items: center; gap: .5rem; }
+.brand .dot { width: .55rem; height: .55rem; border-radius: 50%;
+              background: var(--accent); display: inline-block; }
+nav { display: flex; gap: 1rem; }
+nav a { color: var(--dim); text-decoration: none; }
+nav a:hover { color: var(--ink); }
+nav a.deploy-link { color: var(--accent); font-weight: 600; }
+
+main { max-width: 60rem; margin: 1.5rem auto; padding: 0 1.5rem; }
+
+.mono { font-family: var(--mono); font-size: .92em;
+        font-variant-numeric: tabular-nums; }
+
+.cards { display: grid; gap: 1rem; }
+.card { background: var(--card); border: 1px solid var(--line);
+        border-radius: 10px; padding: 1rem 1.25rem; }
+.card.paused { opacity: .6; }
+.card h2 { margin: 0 0 .25rem; font-size: 1.1rem; }
+.slug { color: var(--dim); font-weight: 400; font-size: .85rem;
+        font-family: var(--mono); }
+.badge { font-size: .7rem; padding: .1rem .5rem; border-radius: 99px;
+         background: var(--line); vertical-align: middle; }
+.badge.warn { background: #ffe8cc; color: var(--warn); }
+
+.queue { list-style: none; padding: 0; margin: .5rem 0; }
+.dim { color: var(--dim); }
+
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+           margin-top: .75rem; border-top: 1px solid var(--line); padding-top: .75rem; }
+.inline { display: inline-flex; gap: .35rem; }
+
+button, .btn, select { border: 1px solid var(--line); background: var(--card);
+               border-radius: 6px; padding: .35rem .8rem; cursor: pointer;
+               font: inherit; text-decoration: none; color: var(--ink); }
+button:hover, .btn:hover { border-color: var(--ink); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { border-color: var(--accent); filter: brightness(1.08); }
+button.danger:hover { border-color: var(--warn); color: var(--warn); }
+
+.flash { padding: .5rem 1rem; border-radius: 8px; margin: .75rem 1.5rem; }
+.flash.ok { background: #ebfbee; color: var(--ok); }
+.flash.error { background: #fff0eb; color: var(--warn); }
+
+.banner { background: #fff4f4; border: 1px solid #ffc9c9; border-radius: 8px;
+          padding: .6rem 1rem; margin-bottom: 1rem; }
+.banner::before { content: ""; display: inline-block; width: .5rem; height: .5rem;
+                  border-radius: 50%; background: var(--accent); margin-right: .5rem; }
+
+.stack { display: grid; gap: .75rem; max-width: 30rem; }
+.stack label { display: grid; gap: .25rem; font-size: .9rem; color: var(--dim); }
+.stack input { font: inherit; padding: .45rem .6rem; border: 1px solid var(--line);
+               border-radius: 6px; color: var(--ink); background: var(--card); }
+.stack input.mono { font-family: var(--mono); }
+.stack input:focus, button:focus-visible, .btn:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.diff { background: #23272b; color: #e6e2dc; padding: 1rem; border-radius: 8px;
+        overflow-x: auto; font-family: var(--mono); font-size: .8rem; }
+.meta { color: var(--dim); }
+
+@media (max-width: 40rem) {
+  header { flex-wrap: wrap; gap: .75rem; }
+  main { margin-top: 1rem; }
+}

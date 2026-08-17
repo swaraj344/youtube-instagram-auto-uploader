@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Shared settings</h2>
+<p class="dim">Stored in .env locally; changed values are pushed as GitHub secrets on Deploy.</p>
+<form method="post" class="stack">
+  {% for key, value in values.items() %}
+  <label>{{ key }}
+    <input name="{{ key }}" value="{{ value }}" autocomplete="off" class="mono">
+  </label>
+  {% endfor %}
+  <p><button type="submit" class="primary">Save locally</button></p>
+</form>
+{% endblock %}

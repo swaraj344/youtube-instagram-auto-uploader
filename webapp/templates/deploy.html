@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Deploy</h2>
+{% if plan.status.clean %}
+  <p>✅ Everything is in sync with GitHub.</p>
+{% else %}
+  <ul>
+    {% if plan.status.config_dirty %}<li>channels.json will be committed &amp; pushed</li>{% endif %}
+    {% if plan.status.secrets_changed %}<li>CHANNELS_SECRETS_JSON secret will be updated</li>{% endif %}
+    {% for k in plan.status.shared_changed %}<li>{{ k }} secret will be updated</li>{% endfor %}
+  </ul>
+  {% if plan.config_diff %}<pre class="diff">{{ plan.config_diff }}</pre>{% endif %}
+  <form method="post"><button type="submit" class="primary">Deploy to GitHub</button></form>
+{% endif %}
+{% endblock %}
