@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from flask import (
     Flask,
+    abort,
     flash,
     jsonify,
     redirect,
@@ -15,85 +16,129 @@ from flask import (
 from config import ConfigError
 from webapp import services
 
+SECTION_META = {
+    "sources": {"label": "Sources", "singular": "source"},
+    "youtube": {"label": "YouTube channels", "singular": "YouTube channel"},
+    "instagram": {"label": "Instagram accounts", "singular": "Instagram account"},
+}
+_SEC = "<any(sources, youtube, instagram):section>"
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
     # Only signs the flash-message cookie; the app never leaves 127.0.0.1.
     app.secret_key = "local-config-ui"
 
+    def _sources_for_forms():
+        return [
+            {"id": s["id"], "name": s["name"]}
+            for s in services.list_entities("sources")
+        ]
+
     @app.get("/")
     def dashboard():
         pull_error = services.refresh_state()
         return render_template(
             "dashboard.html",
-            channels=services.channels_with_status(),
+            sources=services.list_entities("sources"),
+            youtube=services.list_entities("youtube"),
+            instagram=services.list_entities("instagram"),
             deploy=services.deploy_status(),
             meta_days=services.meta_token_days(),
             pull_error=pull_error,
-            legacy=services.legacy_import_available(),
+            migration=services.migration_available(),
         )
 
-    @app.get("/channels/new")
-    def new_channel():
-        return render_template("channel_form.html", ch=None, form={})
+    @app.get(f"/{_SEC}")
+    def entity_list(section):
+        return render_template(
+            "entity_list.html",
+            section=section,
+            meta=SECTION_META[section],
+            rows=services.list_entities(section),
+        )
 
-    @app.post("/channels/new")
-    def create_channel():
-        slug = (request.form.get("slug") or "").strip().lower()
+    @app.get(f"/{_SEC}/new")
+    def new_entity(section):
+        return render_template(
+            "entity_form.html", section=section, meta=SECTION_META[section],
+            e=None, form={}, sources=_sources_for_forms(),
+        )
+
+    @app.post(f"/{_SEC}/new")
+    def create_entity(section):
+        eid = (request.form.get("id") or "").strip().lower()
         try:
-            services.upsert_channel(slug, request.form, new=True)
+            services.upsert_entity(section, eid, request.form, new=True)
         except ConfigError as exc:
             flash(str(exc), "error")
-            return render_template("channel_form.html", ch=None, form=request.form), 400
-        flash(f"Channel '{slug}' saved locally — deploy to apply.", "ok")
-        return redirect(url_for("edit_channel", slug=slug))
+            return render_template(
+                "entity_form.html", section=section, meta=SECTION_META[section],
+                e=None, form=request.form, sources=_sources_for_forms(),
+            ), 400
+        flash(f"Saved '{eid}' locally — deploy to apply.", "ok")
+        return redirect(url_for("edit_entity", section=section, eid=eid))
 
-    @app.get("/channels/<slug>/edit")
-    def edit_channel(slug):
-        ch = services.get_channel(slug)
-        if ch is None:
-            flash(f"No channel '{slug}'.", "error")
-            return redirect(url_for("dashboard"))
-        return render_template("channel_form.html", ch=ch, form={})
+    @app.get(f"/{_SEC}/<eid>/edit")
+    def edit_entity(section, eid):
+        e = services.get_entity(section, eid)
+        if e is None:
+            flash(f"No {SECTION_META[section]['singular']} '{eid}'.", "error")
+            return redirect(url_for("entity_list", section=section))
+        return render_template(
+            "entity_form.html", section=section, meta=SECTION_META[section],
+            e=e, form={}, sources=_sources_for_forms(),
+        )
 
-    @app.post("/channels/<slug>/edit")
-    def update_channel(slug):
+    @app.post(f"/{_SEC}/<eid>/edit")
+    def update_entity(section, eid):
         try:
-            services.upsert_channel(slug, request.form, new=False)
+            services.upsert_entity(section, eid, request.form, new=False)
         except ConfigError as exc:
             flash(str(exc), "error")
-            return (
-                render_template(
-                    "channel_form.html", ch=services.get_channel(slug), form=request.form
-                ),
-                400,
-            )
+            return render_template(
+                "entity_form.html", section=section, meta=SECTION_META[section],
+                e=services.get_entity(section, eid), form=request.form,
+                sources=_sources_for_forms(),
+            ), 400
         flash("Saved locally — deploy to apply.", "ok")
-        return redirect(url_for("edit_channel", slug=slug))
+        return redirect(url_for("edit_entity", section=section, eid=eid))
 
-    @app.post("/channels/<slug>/toggle")
-    def toggle_channel(slug):
-        services.toggle_channel(slug)
-        return redirect(url_for("dashboard"))
-
-    @app.post("/channels/<slug>/delete")
-    def delete_channel(slug):
-        services.delete_channel(slug)
-        flash(
-            f"Channel '{slug}' removed locally — deploy to apply. "
-            "Its state/ files were kept on disk.",
-            "ok",
-        )
-        return redirect(url_for("dashboard"))
-
-    @app.post("/channels/<slug>/connect-youtube")
-    def connect_youtube(slug):
+    @app.post(f"/{_SEC}/<eid>/delete")
+    def delete_entity(section, eid):
         try:
-            services.connect_youtube(slug)
-            flash("YouTube connected — token stored locally. Deploy to apply.", "ok")
+            services.delete_entity(section, eid)
+            flash(f"Removed '{eid}' locally — deploy to apply.", "ok")
+        except ConfigError as exc:
+            flash(str(exc), "error")
+        return redirect(url_for("entity_list", section=section))
+
+    @app.post(f"/{_SEC}/<eid>/toggle")
+    def toggle_entity(section, eid):
+        if section == "sources":
+            abort(404)
+        services.toggle_entity(section, eid)
+        return redirect(url_for("entity_list", section=section))
+
+    @app.post(f"/{_SEC}/<eid>/connect-google")
+    def connect_google(section, eid):
+        try:
+            services.connect_google(section, eid)
+            flash("Google account connected — token stored locally. Deploy to apply.", "ok")
         except Exception as exc:
             flash(f"OAuth failed: {exc}", "error")
-        return redirect(url_for("edit_channel", slug=slug))
+        return redirect(url_for("edit_entity", section=section, eid=eid))
+
+    @app.post(f"/{_SEC}/<eid>/action")
+    def entity_action(section, eid):
+        try:
+            services.trigger_action(
+                eid, request.form.get("action", ""), request.form.get("upload_slot", "")
+            )
+            flash("Dispatched — watch Telegram for progress.", "ok")
+        except Exception as exc:
+            flash(f"Dispatch failed: {exc}", "error")
+        return redirect(url_for("entity_list", section=section))
 
     @app.get("/api/ig-accounts")
     def ig_accounts():
@@ -101,19 +146,6 @@ def create_app() -> Flask:
             return jsonify(services.list_ig_accounts())
         except Exception as exc:
             return jsonify({"error": str(exc)}), 502
-
-    @app.post("/channels/<slug>/action")
-    def channel_action(slug):
-        try:
-            services.trigger_action(
-                slug,
-                request.form.get("action", ""),
-                request.form.get("upload_slot", ""),
-            )
-            flash("Dispatched — watch Telegram for progress.", "ok")
-        except Exception as exc:
-            flash(f"Dispatch failed: {exc}", "error")
-        return redirect(url_for("dashboard"))
 
     @app.get("/settings")
     def settings():
@@ -135,12 +167,12 @@ def create_app() -> Flask:
             flash(line, "ok")
         return redirect(url_for("dashboard"))
 
-    @app.post("/import")
-    def legacy_import():
+    @app.post("/migrate")
+    def migrate():
         try:
-            flash(services.run_legacy_import(), "ok")
+            flash(services.run_migration(), "ok")
         except Exception as exc:
-            flash(f"Import failed: {exc}", "error")
+            flash(f"Migration failed: {exc}", "error")
         return redirect(url_for("dashboard"))
 
     return app

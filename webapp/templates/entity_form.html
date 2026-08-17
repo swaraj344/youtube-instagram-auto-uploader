@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block content %}
+{% set editing = e is not none %}
+<h2>{{ ('Edit ' + e.name) if editing else ('New ' + meta.singular) }}</h2>
+<form method="post" class="stack"
+      action="{{ url_for('update_entity', section=section, eid=e.id) if editing else url_for('create_entity', section=section) }}">
+  <label>Id (permanent, lowercase/digits/hyphens)
+    <input name="id" value="{{ form.get('id', e.id if editing else '') }}"
+           {{ 'readonly' if editing }} required pattern="[a-z0-9-]+">
+  </label>
+  <label>Name
+    <input name="name" value="{{ form.get('name', e.name if editing else '') }}" required>
+  </label>
+
+  {% if section == 'sources' %}
+    <label>Drive folder ID (source videos)
+      <input name="drive_folder_id" class="mono"
+             value="{{ form.get('drive_folder_id', e.drive_folder_id if editing else '') }}">
+    </label>
+  {% else %}
+    <label>Source
+      <select name="source" required>
+        {% for s in sources %}
+          <option value="{{ s.id }}"
+            {{ 'selected' if form.get('source', e.source if editing else '') == s.id }}>
+            {{ s.name }} ({{ s.id }})</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label><input type="checkbox" name="enabled"
+           {{ 'checked' if form.get('enabled') == 'on' or (not form and (not editing or e.enabled)) }}> Enabled</label>
+    <label>Timezone (IANA)
+      <input name="timezone" value="{{ form.get('timezone', e.timezone if editing else 'Asia/Kolkata') }}">
+    </label>
+    <label>Slots (comma-separated HH:MM)
+      <input name="slots" class="mono"
+             value="{{ form.get('slots', e.slots|join(', ') if editing else '17:30') }}" required>
+    </label>
+    <label>Content description (steers AI titles/captions)
+      <input name="content_description"
+             value="{{ form.get('content_description', e.content_description if editing else '') }}">
+    </label>
+  {% endif %}
+
+  {% if section == 'youtube' %}
+    <label>Upload lead (hours before go-live)
+      <input name="upload_lead_hours" type="number" min="1" max="23"
+             value="{{ form.get('upload_lead_hours', e.upload_lead_hours if editing else 8) }}">
+    </label>
+    <label>YouTube category ID
+      <input name="category_id" value="{{ form.get('category_id', e.category_id if editing else '22') }}">
+    </label>
+  {% endif %}
+
+  {% if section == 'instagram' %}
+    <label>Instagram business account ID
+      <input id="ig-id" name="ig_business_account_id" class="mono"
+             value="{{ form.get('ig_business_account_id', e.ig_business_account_id if editing else '') }}">
+    </label>
+    <p><button type="button" onclick="loadIg()">Load my IG accounts</button>
+       <span id="ig-list" class="dim"></span></p>
+  {% endif %}
+
+  <p><button type="submit" class="primary">Save locally</button></p>
+</form>
+
+{% if editing and section in ('sources', 'youtube') %}
+{% set connected = e.google_connected if section == 'sources' else e.youtube_connected %}
+<form method="post" action="{{ url_for('connect_google', section=section, eid=e.id) }}">
+  <p>Google: {{ '✅ connected' if connected else '❌ not connected' }}
+    <button type="submit">{{ 'Reconnect' if connected else 'Connect Google' }}</button>
+    <span class="dim">({{ 'log in with the account that OWNS the Drive folder' if section == 'sources' else "log in with this channel's YouTube account" }})</span>
+  </p>
+</form>
+{% endif %}
+
+{% if section == 'instagram' %}
+<script>
+async function loadIg() {
+  const el = document.getElementById('ig-list');
+  el.textContent = 'Loading…';
+  const resp = await fetch('{{ url_for('ig_accounts') }}');
+  const data = await resp.json();
+  if (!resp.ok) { el.textContent = data.error; return; }
+  el.innerHTML = data.map(a =>
+    `<button type="button" onclick="document.getElementById('ig-id').value='${a.id}'">` +
+    `@${a.username} (${a.page})</button>`).join(' ');
+}
+</script>
+{% endif %}
+{% endblock %}

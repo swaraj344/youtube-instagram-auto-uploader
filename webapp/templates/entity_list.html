@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>{{ meta.label }}
+  <a class="btn" href="{{ url_for('new_entity', section=section) }}">+ Add</a></h2>
+<div class="cards">
+{% for e in rows %}
+  <section class="card {{ 'paused' if e.enabled is defined and not e.enabled }}">
+    <h2>{{ e.name }} <span class="slug">{{ e.id }}</span>
+      {% if e.enabled is defined and not e.enabled %}<span class="badge">paused</span>{% endif %}
+      {% if section != 'sources' and not e.ready %}<span class="badge warn">not ready</span>{% endif %}
+    </h2>
+
+    {% if section == 'sources' %}
+      <p>Google: {{ '✅ connected' if e.google_connected else '❌ not connected' }} ·
+         Folder: {{ '✅ set' if e.has_folder else '❌ missing' }}</p>
+      <p class="dim">Used by:
+        {% for d in e.used_by %}<span class="slug">{{ d }}</span> {% else %}nobody yet{% endfor %}</p>
+    {% else %}
+      <p>Source: <span class="slug">{{ e.source }}</span> ·
+         Slots: <span class="mono">{{ e.slots|join(' · ') }}</span>
+         {% if e.next_slot %} — next <span class="mono">{{ e.next_slot.strftime('%d %b %H:%M') }}</span>{% endif %}</p>
+      {% if section == 'youtube' %}
+        {% if e.pending %}
+          <ul class="queue">
+          {% for item in e.pending %}
+            <li>📋 <span class="mono">{{ item.slot }}</span> → <span class="mono">{{ item.go_live_at }}</span>
+                <a href="https://youtu.be/{{ item.youtube_video_id }}">preview</a></li>
+          {% endfor %}
+          </ul>
+        {% else %}<p class="dim">Nothing queued.</p>{% endif %}
+      {% else %}
+        <p class="dim">{% if e.last_posted %}Last posted <span class="mono">{{ e.last_posted }}</span>{% else %}No posts yet.{% endif %}</p>
+      {% endif %}
+    {% endif %}
+
+    <div class="actions">
+      <a class="btn" href="{{ url_for('edit_entity', section=section, eid=e.id) }}">Edit</a>
+      {% if section == 'youtube' %}
+        <form class="inline" method="post" action="{{ url_for('entity_action', section=section, eid=e.id) }}">
+          <input type="hidden" name="action" value="upload">
+          <select name="upload_slot">
+            {% for s in e.slots %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+          </select>
+          <button type="submit">Upload now</button>
+        </form>
+        <form class="inline" method="post" action="{{ url_for('entity_action', section=section, eid=e.id) }}">
+          <input type="hidden" name="action" value="publishnow">
+          <button type="submit">Publish next now</button>
+        </form>
+      {% elif section == 'instagram' %}
+        <form class="inline" method="post" action="{{ url_for('entity_action', section=section, eid=e.id) }}">
+          <input type="hidden" name="action" value="postnow">
+          <button type="submit">Post next now</button>
+        </form>
+      {% endif %}
+      {% if section != 'sources' %}
+        <form class="inline" method="post" action="{{ url_for('toggle_entity', section=section, eid=e.id) }}">
+          <button type="submit">{{ 'Resume' if not e.enabled else 'Pause' }}</button>
+        </form>
+      {% endif %}
+      <form class="inline" method="post" action="{{ url_for('delete_entity', section=section, eid=e.id) }}"
+            onsubmit="return confirm('Remove {{ e.id }}? State files stay on disk.')">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    </div>
+  </section>
+{% else %}
+  <p>No {{ meta.label|lower }} yet — <a href="{{ url_for('new_entity', section=section) }}">add one</a>.</p>
+{% endfor %}
+</div>
+{% endblock %}
