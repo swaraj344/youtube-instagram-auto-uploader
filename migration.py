@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from config import validate_config
 from utils import load_json, save_json
@@ -109,7 +111,24 @@ def migrate(root: str = ".") -> str:
         save_json(os.path.join(yt_state, "processed_log.json"), log)
         save_json(os.path.join(yt_state, "publish_queue.json"), queue)
         save_json(os.path.join(ig_state, "processed_log.json"), ig_log)
-        save_json(os.path.join(ig_state, "slot_log.json"), {})
+
+        # Seed the IG ledger: every slot occurrence already in the past was
+        # covered by the legacy pipeline (it posted to IG at YouTube publish
+        # time). Without this, the first run after migration would treat the
+        # last 24h of occurrences as due and post extra videos immediately.
+        tz = ZoneInfo(ch.get("timezone", "Asia/Kolkata"))
+        now = datetime.now(tz)
+        slot_seed = {}
+        for slot in ch["slots"]:
+            hour, minute = map(int, slot.split(":"))
+            occ = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if occ > now:
+                occ -= timedelta(days=1)
+            slot_seed[occ.strftime("%Y-%m-%d %H:%M")] = {
+                "status": "posted",
+                "note": "covered by legacy pipeline before migration",
+            }
+        save_json(os.path.join(ig_state, "slot_log.json"), slot_seed)
         if os.path.isdir(old_state):
             shutil.rmtree(old_state)
 

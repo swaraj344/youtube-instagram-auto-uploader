@@ -88,7 +88,12 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(ig_log["processed_file_ids"], ["v1", "v2"])
         queue = self._load("state", "study-yt", "publish_queue.json")
         self.assertEqual([q["youtube_video_id"] for q in queue], ["yA", "yB"])
-        self.assertEqual(self._load("state", "casual-ig", "slot_log.json"), {})
+        # Ledger is seeded: the most recent occurrence of each slot is marked
+        # posted (the legacy pipeline covered them), so the first run after
+        # migration doesn't fire extra IG posts.
+        slot_log = self._load("state", "casual-ig", "slot_log.json")
+        self.assertEqual(len(slot_log), 2)
+        self.assertTrue(all(v["status"] == "posted" for v in slot_log.values()))
 
     def test_legacy_files_removed(self):
         migrate(self.root)
