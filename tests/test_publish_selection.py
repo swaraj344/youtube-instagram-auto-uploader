@@ -1,21 +1,17 @@
-"""Tests for publish_scheduled.select_due (schedule vs force-next selection)."""
+"""Tests for publisher.select_due (schedule vs force-next selection)."""
 
-import os
 import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-os.environ.setdefault("DRIVE_FOLDER_ID", "test-folder")
-os.environ.setdefault("GROQ_API_KEY", "test-key")
-
-from publish_scheduled import select_due
+from publisher import select_due
 
 TZ = ZoneInfo("Asia/Kolkata")
 NOW = datetime(2026, 8, 15, 18, 0, tzinfo=TZ)
 
-PAST = {"slot": "A", "go_live_at": "2026-08-15T17:30:00+05:30", "published": False}
-FUTURE = {"slot": "B", "go_live_at": "2026-08-15T21:30:00+05:30", "published": False}
-DONE = {"slot": "A", "go_live_at": "2026-08-14T17:30:00+05:30", "published": True}
+PAST = {"slot": "17:30", "go_live_at": "2026-08-15T17:30:00+05:30", "published": False}
+FUTURE = {"slot": "21:30", "go_live_at": "2026-08-15T21:30:00+05:30", "published": False}
+DONE = {"slot": "17:30", "go_live_at": "2026-08-14T17:30:00+05:30", "published": True}
 
 
 class SelectDueTest(unittest.TestCase):
