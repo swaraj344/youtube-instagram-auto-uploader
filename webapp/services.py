@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -195,6 +196,7 @@ def list_entities(section: str) -> list:
                 "google_connected": bool(src.google_token),
                 "has_folder": bool(src.drive_folder_id),
                 "used_by": used,
+                "upload": _upload_jobs.get(src.id),
             })
         return out
     dests = cfg.youtube if section == "youtube" else cfg.instagram
@@ -395,6 +397,142 @@ def deploy() -> list:
     os.makedirs(_p(SECRETS_DIR), exist_ok=True)
     save_json(_p(FINGERPRINT_BASENAME), fp)
     return results or ["Nothing to deploy — everything is in sync."]
+
+
+# ---------------------------------------------------------------------------
+# Local folder -> Drive upload (background job with progress)
+# ---------------------------------------------------------------------------
+
+VIDEO_EXTENSIONS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")
+
+# source_id -> mutable progress dict, read by the status endpoint. Jobs live
+# for the app's lifetime; a restart mid-upload is safe (dedupe skips what
+# already made it to Drive).
+_upload_jobs: dict = {}
+
+
+def pick_local_folder():
+    """Open the native macOS folder picker; return a path or None if cancelled."""
+    code, out = _run([
+        "osascript", "-e",
+        'POSIX path of (choose folder with prompt "Choose the folder with your videos")',
+    ])
+    if code != 0:
+        return None
+    return out.strip() or None
+
+
+def upload_status(source_id: str):
+    return _upload_jobs.get(source_id)
+
+
+def _drive_for(token_info: dict):
+    """Build a Drive client for a source token (patched in tests)."""
+    from googleapiclient.discovery import build as gbuild
+
+    from auth import get_credentials
+
+    return gbuild("drive", "v3", credentials=get_credentials(token_info))
+
+
+def start_upload(source_id: str, folder: str) -> None:
+    """Validate, then upload *folder*'s videos to the source's Drive folder
+    in a background thread. Raises RuntimeError on anything the user must fix."""
+    job = _upload_jobs.get(source_id)
+    if job and job.get("status") == "running":
+        raise RuntimeError("An upload is already running for this source.")
+    folder = os.path.expanduser((folder or "").strip())
+    if not os.path.isdir(folder):
+        raise RuntimeError(f"Not a folder: {folder or '(empty)'}")
+    sec = (read_secrets_file().get("sources") or {}).get(source_id) or {}
+    if not sec.get("google_token"):
+        raise RuntimeError("Connect Google for this source first (it owns the Drive folder).")
+    files = sorted(
+        f for f in os.listdir(folder)
+        if f.lower().endswith(VIDEO_EXTENSIONS)
+        and os.path.isfile(os.path.join(folder, f))
+    )
+    if not files:
+        raise RuntimeError(
+            f"No video files ({', '.join(VIDEO_EXTENSIONS)}) found in that folder."
+        )
+
+    state = {
+        "status": "running", "folder": folder, "total": len(files),
+        "done": 0, "uploaded": 0, "skipped": 0, "failed": 0,
+        "current": "", "current_pct": 0, "error": None,
+    }
+    _upload_jobs[source_id] = state
+    threading.Thread(
+        target=_upload_worker, args=(source_id, folder, files, state), daemon=True
+    ).start()
+
+
+def _upload_worker(source_id: str, folder: str, files: list, state: dict) -> None:
+    try:
+        from googleapiclient.http import MediaFileUpload
+
+        from uploader import list_drive_videos
+
+        secrets = read_secrets_file()
+        sec = secrets["sources"][source_id]
+        drive = _drive_for(sec["google_token"])
+
+        folder_id = (sec.get("drive_folder_id") or "").strip()
+        if not folder_id:
+            # First upload for a fresh source: create its Drive folder and
+            # remember the id (deploy pushes it with the secrets blob).
+            src = next(
+                (s for s in read_config().get("sources", []) if s["id"] == source_id),
+                None,
+            )
+            name = (src or {}).get("name", source_id)
+            created = drive.files().create(
+                body={"name": name, "mimeType": "application/vnd.google-apps.folder"},
+                fields="id",
+            ).execute()
+            folder_id = created["id"]
+            secrets["sources"][source_id]["drive_folder_id"] = folder_id
+            write_secrets_file(secrets)
+            state["created_folder"] = True
+
+        existing = {f["name"] for f in list_drive_videos(drive, folder_id)}
+
+        for name in files:
+            state["current"] = name
+            state["current_pct"] = 0
+            if name in existing:
+                state["skipped"] += 1
+                state["done"] += 1
+                continue
+            path = os.path.join(folder, name)
+            try:
+                media = MediaFileUpload(
+                    path, chunksize=8 * 1024 * 1024, resumable=True, mimetype="video/*"
+                )
+                request = drive.files().create(
+                    body={"name": name, "parents": [folder_id]},
+                    media_body=media,
+                    fields="id",
+                )
+                response = None
+                while response is None:
+                    status, response = request.next_chunk()
+                    if status:
+                        state["current_pct"] = int(status.progress() * 100)
+            except Exception as exc:
+                state["failed"] += 1
+                state.setdefault("errors", []).append(f"{name}: {exc}")
+            else:
+                state["uploaded"] += 1
+            state["done"] += 1
+
+        state["current"] = ""
+        state["current_pct"] = 0
+        state["status"] = "done"
+    except Exception as exc:
+        state["status"] = "error"
+        state["error"] = str(exc)
 
 
 # ---------------------------------------------------------------------------

@@ -74,6 +74,59 @@
 </form>
 {% endif %}
 
+{% if editing and section == 'sources' %}
+<section class="card" id="upload-box">
+  <h2>Upload videos from a local folder</h2>
+  <p class="dim">Videos upload to this source's Drive folder in the background
+     (a new Drive folder is created if none is set). Files already in Drive
+     are skipped, so re-running only uploads new ones. Keep the app open
+     until it finishes.</p>
+  <form method="post" class="stack" action="{{ url_for('start_source_upload', eid=e.id) }}">
+    <label>Local folder
+      <span class="inline">
+        <input id="local-folder" name="local_folder" class="mono" style="flex:1"
+               placeholder="/Users/you/Videos/my-clips">
+        <button type="button" onclick="browseFolder()">Browse…</button>
+      </span>
+    </label>
+    <p><button type="submit" class="primary">Upload to Drive</button></p>
+  </form>
+  <div id="upload-progress" hidden>
+    <p id="upload-summary"></p>
+    <div class="progress"><i id="upload-bar"></i></div>
+    <p class="dim" id="upload-current"></p>
+  </div>
+</section>
+
+<script>
+async function browseFolder() {
+  const resp = await fetch('{{ url_for('pick_folder') }}');
+  const data = await resp.json();
+  if (data.path) document.getElementById('local-folder').value = data.path;
+}
+
+async function pollUpload() {
+  const resp = await fetch('{{ url_for('source_upload_status', eid=e.id) }}');
+  const s = await resp.json();
+  const box = document.getElementById('upload-progress');
+  if (s.status === 'idle') { box.hidden = true; return; }
+  box.hidden = false;
+  const pct = s.total ? Math.round(100 * s.done / s.total) : 0;
+  document.getElementById('upload-bar').style.width = pct + '%';
+  const label = {running: '⏫ Uploading', done: '✅ Finished', error: '🔴 Failed'}[s.status] || s.status;
+  document.getElementById('upload-summary').textContent =
+    `${label}: ${s.done}/${s.total} files — ${s.uploaded || 0} uploaded, ` +
+    `${s.skipped || 0} already in Drive` +
+    (s.failed ? `, ${s.failed} failed` : '') +
+    (s.error ? ` — ${s.error}` : '');
+  document.getElementById('upload-current').textContent =
+    s.status === 'running' && s.current ? `${s.current} — ${s.current_pct}%` : '';
+  if (s.status === 'running') setTimeout(pollUpload, 2000);
+}
+pollUpload();
+</script>
+{% endif %}
+
 {% if section == 'instagram' %}
 <script>
 async function loadIg() {

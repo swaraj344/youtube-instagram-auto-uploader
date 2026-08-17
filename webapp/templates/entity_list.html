@@ -12,7 +12,10 @@
 
     {% if section == 'sources' %}
       <p>Google: {{ '✅ connected' if e.google_connected else '❌ not connected' }} ·
-         Folder: {{ '✅ set' if e.has_folder else '❌ missing' }}</p>
+         Folder: {{ '✅ set' if e.has_folder else '❌ missing' }}
+         {% if e.upload and e.upload.status == 'running' %}
+           <span class="badge">⏫ uploading {{ e.upload.done }}/{{ e.upload.total }}</span>
+         {% endif %}</p>
       <p class="dim">Used by:
         {% for d in e.used_by %}<span class="slug">{{ d }}</span> {% else %}nobody yet{% endfor %}</p>
     {% else %}

@@ -140,6 +140,24 @@ def create_app() -> Flask:
             flash(f"Dispatch failed: {exc}", "error")
         return redirect(url_for("entity_list", section=section))
 
+    @app.get("/api/pick-folder")
+    def pick_folder():
+        # Opens the native macOS folder picker; blocks until chosen/cancelled.
+        return jsonify({"path": services.pick_local_folder()})
+
+    @app.post("/sources/<eid>/upload")
+    def start_source_upload(eid):
+        try:
+            services.start_upload(eid, request.form.get("local_folder", ""))
+            flash("Upload started — progress shows below.", "ok")
+        except Exception as exc:
+            flash(f"Upload not started: {exc}", "error")
+        return redirect(url_for("edit_entity", section="sources", eid=eid))
+
+    @app.get("/api/sources/<eid>/upload-status")
+    def source_upload_status(eid):
+        return jsonify(services.upload_status(eid) or {"status": "idle"})
+
     @app.get("/api/ig-accounts")
     def ig_accounts():
         try:

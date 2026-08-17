@@ -71,6 +71,28 @@ class RouteTest(unittest.TestCase):
         resp = self.client.post("/sources/study-drive/toggle")
         self.assertEqual(resp.status_code, 404)
 
+    def test_start_upload_route(self):
+        with patch.object(webapp_app.services, "start_upload") as start:
+            resp = self.client.post("/sources/study-drive/upload",
+                                    data={"local_folder": "/tmp/vids"})
+        self.assertEqual(resp.status_code, 302)
+        start.assert_called_once_with("study-drive", "/tmp/vids")
+
+    def test_upload_status_route(self):
+        with patch.object(webapp_app.services, "upload_status",
+                          return_value={"status": "running", "done": 3, "total": 10}):
+            resp = self.client.get("/api/sources/study-drive/upload-status")
+        self.assertEqual(resp.get_json()["done"], 3)
+        with patch.object(webapp_app.services, "upload_status", return_value=None):
+            resp = self.client.get("/api/sources/study-drive/upload-status")
+        self.assertEqual(resp.get_json()["status"], "idle")
+
+    def test_pick_folder_route(self):
+        with patch.object(webapp_app.services, "pick_local_folder",
+                          return_value="/Users/x/Videos/"):
+            resp = self.client.get("/api/pick-folder")
+        self.assertEqual(resp.get_json()["path"], "/Users/x/Videos/")
+
     def test_migrate_post(self):
         with patch.object(webapp_app.services, "run_migration",
                           return_value="Converted 1 channel(s)") as mig:
