@@ -15,6 +15,8 @@ media_publish makes it go live immediately. That's why publish_scheduled.py
 calls this function exactly when it's time to go live, rather than ahead of time.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import time
@@ -31,26 +33,29 @@ logger = logging.getLogger(__name__)
 GRAPH_API_VERSION = "v21.0"
 BASE_URL = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
-IG_USER_ID = os.environ.get("IG_BUSINESS_ACCOUNT_ID", "").strip()
-ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN", "").strip()
-# Bearer auth header — keeps the token out of POST bodies (and server logs)
-_AUTH_HEADERS = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
-
 _POLL_INTERVAL_SECONDS = 10
 _MAX_POLL_ATTEMPTS = 30  # 5 minutes max
 
 
+def _auth_headers() -> dict:
+    """Bearer auth header — token read at call time so channels share one env."""
+    token = os.environ.get("META_ACCESS_TOKEN", "").strip()
+    if not token:
+        raise ValueError("META_ACCESS_TOKEN must be set")
+    return {"Authorization": f"Bearer {token}"}
+
+
 @retry_on_transient(max_attempts=3, base_delay=5.0)
-def _create_container(video_public_url: str, caption: str) -> str:
+def _create_container(ig_user_id: str, video_public_url: str, caption: str) -> str:
     """Step 1: create the media container and return its ID."""
     resp = requests.post(
-        f"{BASE_URL}/{IG_USER_ID}/media",
+        f"{BASE_URL}/{ig_user_id}/media",
         json={
             "media_type": "REELS",
             "video_url": video_public_url,
             "caption": caption,
         },
-        headers=_AUTH_HEADERS,
+        headers=_auth_headers(),
         timeout=30,
     )
     resp.raise_for_status()
@@ -63,7 +68,7 @@ def _get_container_status(container_id: str) -> str:
     resp = requests.get(
         f"{BASE_URL}/{container_id}",
         params={"fields": "status_code"},
-        headers=_AUTH_HEADERS,
+        headers=_auth_headers(),
         timeout=15,
     )
     resp.raise_for_status()
@@ -71,12 +76,12 @@ def _get_container_status(container_id: str) -> str:
 
 
 @retry_on_transient(max_attempts=3, base_delay=5.0)
-def _publish_container(container_id: str) -> str:
+def _publish_container(ig_user_id: str, container_id: str) -> str:
     """Step 3: publish the container and return the published media ID."""
     resp = requests.post(
-        f"{BASE_URL}/{IG_USER_ID}/media_publish",
+        f"{BASE_URL}/{ig_user_id}/media_publish",
         json={"creation_id": container_id},
-        headers=_AUTH_HEADERS,
+        headers=_auth_headers(),
         timeout=30,
     )
     resp.raise_for_status()
@@ -88,34 +93,34 @@ def get_reel_permalink(media_id: str) -> str:
     resp = requests.get(
         f"{BASE_URL}/{media_id}",
         params={"fields": "permalink"},
-        headers=_AUTH_HEADERS,
+        headers=_auth_headers(),
         timeout=15,
     )
     resp.raise_for_status()
     return resp.json()["permalink"]
 
 
-def publish_reel(video_public_url: str, caption: str) -> str:
+def publish_reel(ig_user_id: str, video_public_url: str, caption: str) -> str:
     """Upload and publish a Reel. Returns the published media ID.
 
     Args:
+        ig_user_id: the channel's IG business account ID.
         video_public_url: a publicly accessible URL Instagram's servers can fetch.
         caption: the Instagram caption including hashtags.
 
     Raises:
-        ValueError: if required env vars are missing.
+        ValueError: if ig_user_id is empty or META_ACCESS_TOKEN is unset.
         RuntimeError: if Instagram reports a processing error.
         TimeoutError: if processing takes longer than ~5 minutes.
         requests.HTTPError: on unrecoverable API errors (after retries).
     """
-    if not IG_USER_ID or not ACCESS_TOKEN:
-        raise ValueError(
-            "IG_BUSINESS_ACCOUNT_ID and META_ACCESS_TOKEN must be set in .env"
-        )
+    if not ig_user_id:
+        raise ValueError("ig_user_id is required (channel's IG business account ID)")
+    _auth_headers()  # fail fast if META_ACCESS_TOKEN is missing
 
     # Step 1: create container
     logger.info("  Creating Instagram media container...")
-    container_id = _create_container(video_public_url, caption)
+    container_id = _create_container(ig_user_id, video_public_url, caption)
     logger.info("  Container ID: %s", container_id)
 
     # Step 2: poll until Instagram finishes processing
@@ -143,6 +148,6 @@ def publish_reel(video_public_url: str, caption: str) -> str:
 
     # Step 3: publish
     logger.info("  Publishing Reel...")
-    media_id = _publish_container(container_id)
+    media_id = _publish_container(ig_user_id, container_id)
     logger.info("  Reel published. Media ID: %s", media_id)
     return media_id
