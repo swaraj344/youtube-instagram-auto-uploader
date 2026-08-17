@@ -34,23 +34,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # /status reads the Drive folder, which needs Google credentials
-      - name: Reconstruct Google credential files from secrets
-        env:
-          GOOGLE_CLIENT_SECRET_JSON: ${{ secrets.GOOGLE_CLIENT_SECRET_JSON }}
-          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
-        run: |
-          python - <<'EOF'
-          import os, pathlib
-          pathlib.Path("client_secret.json").write_text(os.environ["GOOGLE_CLIENT_SECRET_JSON"])
-          pathlib.Path("token.json").write_text(os.environ["GOOGLE_TOKEN_JSON"])
-          EOF
-
       - name: Poll Telegram for commands
         env:
           GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          CHANNELS_SECRETS_JSON: ${{ secrets.CHANNELS_SECRETS_JSON }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
-          IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
         run: python telegram_commands.py
