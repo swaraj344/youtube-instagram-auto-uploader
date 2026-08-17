@@ -2,11 +2,13 @@
 Telegram command poller. Runs every 5 minutes via .github/workflows/telegram-bot.yml.
 
 Reads pending bot messages, ignores anyone who isn't the configured chat, and:
-  /status      -> replies inline with pipeline state (read-only)
-  /upload A|B  -> dispatches the main pipeline workflow with that slot
-  /publish     -> dispatches a publish check (publishes anything due)
-  /publishnow  -> dispatches a forced publish of the next queued video
-  anything else -> help text
+  /status                  -> replies inline with every channel's state (read-only)
+  /upload [channel] [HH:MM]-> dispatches an upload for that channel/slot
+  /publish                 -> dispatches a publish check (publishes anything due)
+  /publishnow [channel]    -> dispatches a forced publish of the next queued video
+  anything else            -> help text
+
+The channel slug may be omitted when exactly one channel is enabled.
 
 Updates are ACKNOWLEDGED BEFORE processing (at-most-once): if a run crashes
 mid-command the command is dropped, never executed twice. The confirmation
@@ -16,9 +18,11 @@ Exits cleanly when Telegram env vars are unset so the workflow can exist
 before the bot account does.
 """
 
+from __future__ import annotations
+
 import logging
 import os
-from datetime import datetime, timezone
+import re
 
 import requests
 from dotenv import load_dotenv
@@ -36,13 +40,13 @@ logger = logging.getLogger(__name__)
 
 HELP_TEXT = (
     "Commands:\n"
-    "/status — queue and pipeline state\n"
-    "/upload A or /upload B — queue next video for a slot\n"
+    "/status — every channel's queue and pipeline state\n"
+    "/upload [channel] [HH:MM] — queue next video (channel optional when only one)\n"
     "/publish — publish anything that is due now\n"
-    "/publishnow — publish the next queued video immediately"
+    "/publishnow [channel] — publish the next queued video immediately"
 )
 
-_VALID_SLOTS = ("A", "B")
+_TIME_ARG_RE = re.compile(r"^\d{1,2}:\d{2}$")
 
 
 # ---------------------------------------------------------------------------
@@ -59,41 +63,74 @@ def parse_command(text: str):
 
     if cmd == "status":
         return ("status", {})
-    if cmd == "publishnow":
-        return ("publishnow", {})
     if cmd == "publish":
         return ("publish", {})
+    if cmd == "publishnow":
+        channel = parts[1].lower() if len(parts) > 1 else None
+        return ("publishnow", {"channel": channel})
     if cmd == "upload":
-        if len(parts) >= 2 and parts[1].upper() in _VALID_SLOTS:
-            return ("upload", {"slot": parts[1].upper()})
-        return ("invalid_upload", {})
+        channel = None
+        slot = None
+        for arg in parts[1:]:
+            if _TIME_ARG_RE.match(arg):
+                slot = arg
+            else:
+                channel = arg.lower()
+        return ("upload", {"channel": channel, "slot": slot})
     return ("unknown", {})
+
+
+def resolve_channel(requested, channels):
+    """Map an optional requested slug to a concrete one.
+
+    Returns (slug, None) on success or (None, error_reply) when the user
+    must specify (unknown slug, or several channels and none given).
+    """
+    if requested:
+        if requested in channels:
+            return requested, None
+        return None, (
+            f"Unknown channel '{requested}'. "
+            f"Channels: {', '.join(channels) or 'none configured'}"
+        )
+    if len(channels) == 1:
+        return channels[0], None
+    return None, f"Which channel? One of: {', '.join(channels) or 'none configured'}"
 
 
 def handle_message(text: str, deps: dict) -> str:
     """Route one authorized message; return the reply text.
 
-    deps: {"dispatch": fn(inputs: dict), "build_status": fn() -> str}
+    deps: {"dispatch": fn(inputs: dict), "build_status": fn() -> str,
+           "channels": [enabled channel slugs]}
     """
     parsed = parse_command(text)
     command, args = parsed if parsed else ("unknown", {})
+    channels = deps.get("channels", [])
 
     if command == "status":
         return deps["build_status"]()
     if command == "upload":
-        deps["dispatch"]({"slot": args["slot"]})
+        slug, err = resolve_channel(args["channel"], channels)
+        if err:
+            return err
+        deps["dispatch"](
+            {"channel": slug, "action": "upload", "upload_slot": args["slot"] or ""}
+        )
+        slot_note = f" for {args['slot']}" if args["slot"] else ""
         return (
-            f"⏳ Queuing next video for slot {args['slot']} — "
+            f"⏳ [{slug}] Queuing next video{slot_note} — "
             "you'll get the preview link when it's uploaded."
         )
     if command == "publish":
         deps["dispatch"]({})
         return "⏳ Running a publish check — anything due goes live now."
     if command == "publishnow":
-        deps["dispatch"]({"force_next": "true"})
-        return "⏳ Force-publishing the next queued video."
-    if command == "invalid_upload":
-        return "Usage: /upload A or /upload B"
+        slug, err = resolve_channel(args["channel"], channels)
+        if err:
+            return err
+        deps["dispatch"]({"channel": slug, "action": "publishnow"})
+        return f"⏳ [{slug}] Force-publishing the next queued video."
     return HELP_TEXT
 
 
@@ -130,9 +167,10 @@ def dispatch_pipeline(inputs: dict) -> None:
     """Trigger the main pipeline workflow, same as the Actions 'Run workflow' button."""
     gh_token = os.environ["GH_DISPATCH_TOKEN"]
     repo = os.environ["GITHUB_REPOSITORY"]
+    ref = os.environ.get("GITHUB_REF_NAME", "main")
     resp = requests.post(
         f"https://api.github.com/repos/{repo}/actions/workflows/pipeline.yml/dispatches",
-        json={"ref": "main", "inputs": inputs},
+        json={"ref": ref, "inputs": inputs},
         headers={
             "Authorization": f"Bearer {gh_token}",
             "Accept": "application/vnd.github+json",
@@ -151,28 +189,40 @@ def build_status() -> str:
         from googleapiclient.discovery import build as gbuild
 
         from auth import get_credentials
-        from upload_unlisted import DRIVE_FOLDER_ID, list_drive_videos
+        from config import load_channels
+        from uploader import list_drive_videos
         from utils import load_json
 
-        drive = gbuild("drive", "v3", credentials=get_credentials())
-        videos = list_drive_videos(drive, DRIVE_FOLDER_ID)
-        processed = set(
-            load_json("processed_log.json", {"processed_file_ids": []})["processed_file_ids"]
-        )
-        remaining = [v for v in videos if v["id"] not in processed]
-        lines.append(f"🎬 {len(remaining)} videos left in Drive ({len(videos)} total)")
-
-        queue = load_json("publish_queue.json", [])
-        pending = [q for q in queue if not q.get("published")]
-        if pending:
-            for item in pending:
-                lines.append(
-                    f"📋 Slot {item['slot']} queued → live at {item['go_live_at']}"
+        for ch in load_channels():
+            if not ch.enabled:
+                lines.append(f"⏸ <b>{ch.display_name}</b> — paused")
+                continue
+            lines.append(f"📺 <b>{ch.display_name}</b> ({ch.slug})")
+            if not ch.has_secrets():
+                lines.append("  ⚠️ Secrets missing — channel is being skipped")
+                continue
+            try:
+                drive = gbuild("drive", "v3", credentials=get_credentials(ch.google_token))
+                videos = list_drive_videos(drive, ch.drive_folder_id)
+                processed = set(
+                    load_json(ch.log_file, {"processed_file_ids": []})["processed_file_ids"]
                 )
-        else:
-            lines.append("📋 Nothing queued right now")
+                remaining = [v for v in videos if v["id"] not in processed]
+                lines.append(f"  🎬 {len(remaining)} videos left ({len(videos)} total)")
+
+                queue = load_json(ch.queue_file, [])
+                pending = [q for q in queue if not q.get("published")]
+                if pending:
+                    for item in pending:
+                        lines.append(
+                            f"  📋 {item['slot']} queued → live at {item['go_live_at']}"
+                        )
+                else:
+                    lines.append("  📋 Nothing queued right now")
+            except Exception as exc:
+                lines.append(f"  ⚠️ Could not read state: {exc}")
     except Exception as exc:
-        lines.append(f"⚠️ Could not read queue/Drive state: {exc}")
+        lines.append(f"⚠️ Could not load channel config: {exc}")
 
     try:
         from check_token_expiry import meta_token_days_left
@@ -198,7 +248,19 @@ def main() -> None:
         logger.info("No pending messages.")
         return
 
-    deps = {"dispatch": dispatch_pipeline, "build_status": build_status}
+    try:
+        from config import load_channels
+
+        enabled = [c.slug for c in load_channels() if c.enabled]
+    except Exception as exc:
+        logger.warning("Could not load channels: %s", exc)
+        enabled = []
+
+    deps = {
+        "dispatch": dispatch_pipeline,
+        "build_status": build_status,
+        "channels": enabled,
+    }
     for text in authorized_texts(updates, chat_id):
         logger.info("Handling command: %s", text)
         reply = handle_message(text, deps)

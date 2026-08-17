@@ -1,29 +1,53 @@
-"""Tests for telegram_commands.py (parsing, filtering, routing)."""
+"""Tests for telegram_commands.py (parsing, channel resolution, routing)."""
 
-import os
 import unittest
 
-os.environ.setdefault("DRIVE_FOLDER_ID", "test-folder")
-os.environ.setdefault("GROQ_API_KEY", "test-key")
-
-from telegram_commands import authorized_texts, handle_message, parse_command
+from telegram_commands import (
+    HELP_TEXT,
+    authorized_texts,
+    handle_message,
+    parse_command,
+    resolve_channel,
+)
 
 
 class ParseCommandTest(unittest.TestCase):
     def test_status(self):
         self.assertEqual(parse_command("/status"), ("status", {}))
 
-    def test_upload_with_slot_case_insensitive(self):
-        self.assertEqual(parse_command("/upload a"), ("upload", {"slot": "A"}))
-        self.assertEqual(parse_command("/UPLOAD B"), ("upload", {"slot": "B"}))
+    def test_upload_with_channel_and_slot(self):
+        self.assertEqual(
+            parse_command("/upload study 17:30"),
+            ("upload", {"channel": "study", "slot": "17:30"}),
+        )
 
-    def test_upload_missing_or_bad_slot_is_invalid(self):
-        self.assertEqual(parse_command("/upload"), ("invalid_upload", {}))
-        self.assertEqual(parse_command("/upload C"), ("invalid_upload", {}))
+    def test_upload_slot_only(self):
+        self.assertEqual(
+            parse_command("/upload 17:30"),
+            ("upload", {"channel": None, "slot": "17:30"}),
+        )
 
-    def test_publish_and_publishnow_are_distinct(self):
+    def test_upload_channel_only_case_insensitive(self):
+        self.assertEqual(
+            parse_command("/UPLOAD Study"),
+            ("upload", {"channel": "study", "slot": None}),
+        )
+
+    def test_upload_bare(self):
+        self.assertEqual(
+            parse_command("/upload"), ("upload", {"channel": None, "slot": None})
+        )
+
+    def test_publishnow_with_channel(self):
+        self.assertEqual(
+            parse_command("/publishnow memes"), ("publishnow", {"channel": "memes"})
+        )
+
+    def test_publishnow_bare(self):
+        self.assertEqual(parse_command("/publishnow"), ("publishnow", {"channel": None}))
+
+    def test_publish_distinct_from_publishnow(self):
         self.assertEqual(parse_command("/publish"), ("publish", {}))
-        self.assertEqual(parse_command("/publishnow"), ("publishnow", {}))
 
     def test_botname_suffix_stripped(self):
         self.assertEqual(parse_command("/status@my_bot"), ("status", {}))
@@ -35,49 +59,81 @@ class ParseCommandTest(unittest.TestCase):
         self.assertEqual(parse_command("/frobnicate"), ("unknown", {}))
 
 
+class ResolveChannelTest(unittest.TestCase):
+    def test_explicit_valid_slug(self):
+        self.assertEqual(resolve_channel("study", ["study", "memes"]), ("study", None))
+
+    def test_explicit_unknown_slug_errors(self):
+        slug, err = resolve_channel("nope", ["study"])
+        self.assertIsNone(slug)
+        self.assertIn("nope", err)
+
+    def test_omitted_with_single_channel_defaults(self):
+        self.assertEqual(resolve_channel(None, ["study"]), ("study", None))
+
+    def test_omitted_with_multiple_channels_errors(self):
+        slug, err = resolve_channel(None, ["study", "memes"])
+        self.assertIsNone(slug)
+        self.assertIn("study", err)
+        self.assertIn("memes", err)
+
+
 class HandleMessageTest(unittest.TestCase):
     def setUp(self):
         self.dispatched = []
         self.deps = {
-            "dispatch": lambda inputs: self.dispatched.append(inputs),
-            "build_status": lambda: "STATUS TEXT",
+            "dispatch": self.dispatched.append,
+            "build_status": lambda: "STATUS",
+            "channels": ["study"],
         }
 
-    def test_status_returns_status_text_without_dispatch(self):
-        reply = handle_message("/status", self.deps)
-        self.assertEqual(reply, "STATUS TEXT")
+    def test_status(self):
+        self.assertEqual(handle_message("/status", self.deps), "STATUS")
+
+    def test_upload_defaults_to_single_channel(self):
+        reply = handle_message("/upload 17:30", self.deps)
+        self.assertEqual(
+            self.dispatched,
+            [{"channel": "study", "action": "upload", "upload_slot": "17:30"}],
+        )
+        self.assertIn("study", reply)
+
+    def test_upload_without_slot_sends_empty_slot(self):
+        handle_message("/upload", self.deps)
+        self.assertEqual(
+            self.dispatched,
+            [{"channel": "study", "action": "upload", "upload_slot": ""}],
+        )
+
+    def test_upload_ambiguous_channel_asks_instead_of_dispatching(self):
+        self.deps["channels"] = ["study", "memes"]
+        reply = handle_message("/upload", self.deps)
         self.assertEqual(self.dispatched, [])
+        self.assertIn("study", reply)
 
-    def test_upload_dispatches_slot(self):
-        handle_message("/upload B", self.deps)
-        self.assertEqual(self.dispatched, [{"slot": "B"}])
-
-    def test_publish_dispatches_no_inputs(self):
+    def test_publish_dispatches_plain_pass(self):
         handle_message("/publish", self.deps)
         self.assertEqual(self.dispatched, [{}])
 
-    def test_publishnow_dispatches_force_next(self):
-        handle_message("/publishnow", self.deps)
-        self.assertEqual(self.dispatched, [{"force_next": "true"}])
+    def test_publishnow_dispatches_action(self):
+        handle_message("/publishnow study", self.deps)
+        self.assertEqual(
+            self.dispatched, [{"channel": "study", "action": "publishnow"}]
+        )
 
-    def test_unknown_gets_help_without_dispatch(self):
-        reply = handle_message("/frobnicate", self.deps)
-        self.assertIn("/upload", reply)
-        self.assertEqual(self.dispatched, [])
+    def test_unknown_gets_help(self):
+        self.assertEqual(handle_message("/wat", self.deps), HELP_TEXT)
+        self.assertEqual(handle_message("hi", self.deps), HELP_TEXT)
 
 
 class AuthorizedTextsTest(unittest.TestCase):
-    def test_filters_to_configured_chat_and_text_messages(self):
+    def test_filters_by_chat_id(self):
         updates = [
-            {"update_id": 1, "message": {"chat": {"id": 42}, "text": "/status"}},
-            {"update_id": 2, "message": {"chat": {"id": 999}, "text": "/publish"}},
-            {"update_id": 3, "message": {"chat": {"id": 42}, "photo": []}},
-            {"update_id": 4},
-            {"update_id": 5, "message": {"chat": {"id": 42}, "text": "/upload A"}},
+            {"message": {"chat": {"id": 111}, "text": "/status"}},
+            {"message": {"chat": {"id": 222}, "text": "/upload"}},
+            {"message": {"chat": {"id": 111}}},  # no text
         ]
-        self.assertEqual(
-            list(authorized_texts(updates, "42")), ["/status", "/upload A"]
-        )
+        self.assertEqual(list(authorized_texts(updates, "111")), ["/status"])
 
 
 if __name__ == "__main__":
