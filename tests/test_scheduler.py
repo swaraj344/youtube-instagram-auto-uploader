@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import Channel
+from config import YouTubeDest
 from run_pipeline import (
     already_queued,
     due_uploads,
@@ -17,14 +17,15 @@ TZ = ZoneInfo("Asia/Kolkata")
 
 def make_channel(**over):
     base = dict(
-        slug="study",
-        display_name="Study",
+        id="study-yt",
+        name="Study",
+        source="study-drive",
         slots=["17:30", "21:30"],
         upload_lead_hours=8,
         timezone="Asia/Kolkata",
     )
     base.update(over)
-    return Channel(**base)
+    return YouTubeDest(**base)
 
 
 class NextSlotOccurrenceTest(unittest.TestCase):

@@ -1,17 +1,20 @@
 """
-Single entry point for the multi-channel pipeline. CI runs this every 15
-minutes; slot times are pure config (channels.json), so changing them never
-touches workflow YAML.
+Single entry point for the pipeline. CI runs this every 15 minutes; slot
+times are pure config (config.json), so changing them never touches
+workflow YAML.
 
-Per enabled channel, each pass:
-  1. Uploads any slot whose lead window has opened (go-live minus
-     upload_lead_hours) and isn't already queued for that occurrence.
-  2. Publishes any queue item whose go-live time has arrived.
+Each pass, per enabled destination:
+  YouTube:   upload any slot whose lead window has opened (go-live minus
+             upload_lead_hours), then flip public anything whose go-live
+             time has arrived.
+  Instagram: post the next unused source video for any slot occurrence
+             that has arrived (tracked in a per-destination ledger).
 
 Manual/targeted runs (Telegram bot, web app, Actions UI):
-  python run_pipeline.py --channel study --upload-slot 17:30   # queue for a slot
-  python run_pipeline.py --channel study --upload-slot ""      # first slot
-  python run_pipeline.py --channel study --force-next          # publish next now
+  python run_pipeline.py --target study-yt --upload-slot 17:30   # queue a slot
+  python run_pipeline.py --target study-yt --upload-slot ""      # first slot
+  python run_pipeline.py --target study-yt --force-next          # flip public now
+  python run_pipeline.py --target casual-ig --post-now           # IG post now
 """
 
 from __future__ import annotations
@@ -26,10 +29,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import Channel, load_channels  # noqa: E402
-from publisher import run_publish  # noqa: E402
+from config import load_config  # noqa: E402
 from telegram_notifier import notify  # noqa: E402
-from uploader import run_upload  # noqa: E402
 from utils import load_json, save_json  # noqa: E402
 
 logging.basicConfig(
@@ -66,13 +67,13 @@ def already_queued(queue: list, slot: str, go_live: datetime) -> bool:
     )
 
 
-def due_uploads(channel: Channel, queue: list, now: datetime) -> list:
+def due_uploads(dest, queue: list, now: datetime) -> list:
     """[(slot, go_live_datetime), ...] for every slot whose upload should run now."""
-    tz = ZoneInfo(channel.timezone)
+    tz = ZoneInfo(dest.timezone)
     due = []
-    for slot in channel.slots:
+    for slot in dest.slots:
         go_live = next_slot_occurrence(slot, tz, now)
-        if upload_window_open(go_live, now, channel.upload_lead_hours) and not already_queued(
+        if upload_window_open(go_live, now, dest.upload_lead_hours) and not already_queued(
             queue, slot, go_live
         ):
             due.append((slot, go_live))
@@ -80,53 +81,92 @@ def due_uploads(channel: Channel, queue: list, now: datetime) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Missing-secrets warning (once per channel, cleared when fixed)
+# Missing-secrets warning (once per destination, cleared when fixed)
 # ---------------------------------------------------------------------------
 
-def _warn_file(channel: Channel) -> str:
-    return os.path.join(channel.state_dir, "secrets_warning.json")
+def _warn_file(dest) -> str:
+    return os.path.join(dest.state_dir, "secrets_warning.json")
 
 
-def warn_missing_secrets(channel: Channel) -> None:
-    os.makedirs(channel.state_dir, exist_ok=True)
-    if not load_json(_warn_file(channel), {}).get("notified"):
+def warn_missing_secrets(dest, detail: str) -> None:
+    os.makedirs(dest.state_dir, exist_ok=True)
+    if not load_json(_warn_file(dest), {}).get("notified"):
         notify(
-            f"⚠️ <b>[{channel.display_name}] Channel skipped</b> — secrets are "
-            "missing or incomplete (need Drive folder, IG account, and a "
-            "connected YouTube account). Fix it in the config app and deploy."
+            f"⚠️ <b>[{dest.name}] Skipped</b> — {detail} "
+            "Fix it in the config app and deploy."
         )
-        save_json(_warn_file(channel), {"notified": True})
+        save_json(_warn_file(dest), {"notified": True})
 
 
-def clear_secrets_warning(channel: Channel) -> None:
-    if os.path.exists(_warn_file(channel)):
-        os.remove(_warn_file(channel))
+def clear_secrets_warning(dest) -> None:
+    if os.path.exists(_warn_file(dest)):
+        os.remove(_warn_file(dest))
+
+
+def _ready(cfg, dest) -> bool:
+    """Check dest + its source secrets; warn-once and skip when incomplete."""
+    source = cfg.sources[dest.source]
+    if not source.has_secrets():
+        warn_missing_secrets(
+            dest, f"its source '{source.name}' is missing Drive folder or Google login."
+        )
+        return False
+    if not dest.has_secrets():
+        kind = "YouTube login" if dest.kind == "youtube" else "Instagram account id"
+        warn_missing_secrets(dest, f"its {kind} is missing.")
+        return False
+    clear_secrets_warning(dest)
+    return True
 
 
 # ---------------------------------------------------------------------------
-# Per-channel pass
+# Per-destination passes
 # ---------------------------------------------------------------------------
 
-def process_channel(channel: Channel, now: datetime) -> None:
-    os.makedirs(channel.state_dir, exist_ok=True)
-    queue = load_json(channel.queue_file, [])
-    for slot, go_live in due_uploads(channel, queue, now):
-        logger.info("[%s] Upload window open for %s (live %s)", channel.slug, slot, go_live)
-        run_upload(channel, go_live, slot)
-    run_publish(channel, now)
+def process_youtube(cfg, yt, now: datetime) -> None:
+    from publisher import run_publish
+    from uploader import run_upload
+
+    os.makedirs(yt.state_dir, exist_ok=True)
+    queue = load_json(yt.queue_file, [])
+    for slot, go_live in due_uploads(yt, queue, now):
+        logger.info("[%s] Upload window open for %s (live %s)", yt.id, slot, go_live)
+        run_upload(cfg.sources[yt.source], yt, go_live, slot)
+    run_publish(yt, now)
 
 
-def manual_upload(channel: Channel, slot_arg: str, now: datetime) -> None:
-    slot = slot_arg or channel.slots[0]
-    if slot not in channel.slots:
-        raise SystemExit(f"Unknown slot {slot!r} for {channel.slug} (has: {channel.slots})")
-    os.makedirs(channel.state_dir, exist_ok=True)
-    go_live = next_slot_occurrence(slot, ZoneInfo(channel.timezone), now)
-    queue = load_json(channel.queue_file, [])
+def process_instagram(cfg, ig, now: datetime) -> None:
+    from ig_poster import due_posts, run_post
+
+    os.makedirs(ig.state_dir, exist_ok=True)
+    slot_log = load_json(ig.slot_log_file, {})
+    for occurrence, slot in due_posts(ig, slot_log, now):
+        logger.info("[%s] Slot %s occurrence due (%s)", ig.id, slot, occurrence)
+        run_post(cfg.sources[ig.source], ig, occurrence, slot)
+
+
+def manual_upload(cfg, yt, slot_arg: str, now: datetime) -> None:
+    from uploader import run_upload
+
+    slot = slot_arg or yt.slots[0]
+    if slot not in yt.slots:
+        raise SystemExit(f"Unknown slot {slot!r} for {yt.id} (has: {yt.slots})")
+    os.makedirs(yt.state_dir, exist_ok=True)
+    go_live = next_slot_occurrence(slot, ZoneInfo(yt.timezone), now)
+    queue = load_json(yt.queue_file, [])
     if already_queued(queue, slot, go_live):
-        notify(f"📭 [{channel.display_name}] {slot} is already queued for {go_live:%d %b}.")
+        notify(f"📭 [{yt.name}] {slot} is already queued for {go_live:%d %b}.")
         return
-    run_upload(channel, go_live, slot)
+    run_upload(cfg.sources[yt.source], yt, go_live, slot)
+
+
+def manual_post(cfg, ig, now: datetime) -> None:
+    from ig_poster import run_post
+
+    os.makedirs(ig.state_dir, exist_ok=True)
+    # Slot key "manual" never matches a real slot occurrence, so a manual
+    # post can never suppress a scheduled one.
+    run_post(cfg.sources[ig.source], ig, now.replace(second=0, microsecond=0), "manual")
 
 
 # ---------------------------------------------------------------------------
@@ -134,49 +174,77 @@ def manual_upload(channel: Channel, slot_arg: str, now: datetime) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Multi-channel pipeline dispatcher.")
-    parser.add_argument("--channel", default="", help="Restrict to one channel slug")
+    parser = argparse.ArgumentParser(
+        description="Pipeline dispatcher (sources / YouTube / Instagram)."
+    )
+    parser.add_argument("--target", default="", help="Restrict to one destination id")
     parser.add_argument(
         "--upload-slot",
         default=None,
-        help='Force an upload for this HH:MM slot ("" = channel\'s first slot). Requires --channel.',
+        help='YouTube: force an upload for this HH:MM slot ("" = first slot). Requires --target.',
     )
     parser.add_argument(
         "--force-next",
         action="store_true",
-        help="Publish the channel's earliest queued video immediately. Requires --channel.",
+        help="YouTube: publish the earliest queued video now. Requires --target.",
+    )
+    parser.add_argument(
+        "--post-now",
+        action="store_true",
+        help="Instagram: post the next unused source video now. Requires --target.",
     )
     args = parser.parse_args()
 
-    if (args.upload_slot is not None or args.force_next) and not args.channel:
-        parser.error("--upload-slot/--force-next require --channel")
+    manual = args.upload_slot is not None or args.force_next or args.post_now
+    if manual and not args.target:
+        parser.error("--upload-slot/--force-next/--post-now require --target")
 
-    channels = load_channels()
-    if args.channel:
-        channels = [c for c in channels if c.slug == args.channel]
-        if not channels:
-            raise SystemExit(f"Unknown channel: {args.channel}")
+    cfg = load_config()
 
-    for channel in channels:
-        # A targeted --channel run works even on a paused channel (explicit
-        # human intent); the scheduled pass skips paused channels.
-        if not channel.enabled and not args.channel:
-            continue
-
-        now = datetime.now(ZoneInfo(channel.timezone))
-
-        if not channel.has_secrets():
-            logger.warning("[%s] Missing secrets — skipping.", channel.slug)
-            warn_missing_secrets(channel)
-            continue
-        clear_secrets_warning(channel)
-
-        if args.upload_slot is not None:
-            manual_upload(channel, args.upload_slot.strip(), now)
+    if args.target:
+        dest = next(
+            (d for d in list(cfg.youtube) + list(cfg.instagram) if d.id == args.target),
+            None,
+        )
+        if dest is None:
+            raise SystemExit(f"Unknown target: {args.target}")
+        now = datetime.now(ZoneInfo(dest.timezone))
+        if not _ready(cfg, dest):
+            return
+        if args.post_now:
+            if dest.kind != "instagram":
+                raise SystemExit(f"--post-now targets an Instagram account, not {dest.id}")
+            manual_post(cfg, dest, now)
+        elif args.upload_slot is not None:
+            if dest.kind != "youtube":
+                raise SystemExit(f"--upload-slot targets a YouTube channel, not {dest.id}")
+            manual_upload(cfg, dest, args.upload_slot.strip(), now)
         elif args.force_next:
-            run_publish(channel, now, force_next=True)
+            if dest.kind != "youtube":
+                raise SystemExit(f"--force-next targets a YouTube channel, not {dest.id}")
+            from publisher import run_publish
+
+            run_publish(dest, now, force_next=True)
         else:
-            process_channel(channel, now)
+            if dest.kind == "youtube":
+                process_youtube(cfg, dest, now)
+            else:
+                process_instagram(cfg, dest, now)
+        return
+
+    for yt in cfg.youtube:
+        if not yt.enabled:
+            continue
+        now = datetime.now(ZoneInfo(yt.timezone))
+        if _ready(cfg, yt):
+            process_youtube(cfg, yt, now)
+
+    for ig in cfg.instagram:
+        if not ig.enabled:
+            continue
+        now = datetime.now(ZoneInfo(ig.timezone))
+        if _ready(cfg, ig):
+            process_instagram(cfg, ig, now)
 
 
 if __name__ == "__main__":
