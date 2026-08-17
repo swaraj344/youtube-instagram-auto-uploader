@@ -37,7 +37,7 @@ jobs:
       - name: Poll Telegram for commands
         env:
           GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CHANNELS_SECRETS_JSON: ${{ secrets.CHANNELS_SECRETS_JSON }}
+          PIPELINE_SECRETS_JSON: ${{ secrets.PIPELINE_SECRETS_JSON }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
         run: python telegram_commands.py
