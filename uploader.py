@@ -1,14 +1,14 @@
 """
-Upload step of the pipeline, called by run_pipeline.py when a slot's lead
-window opens (go-live minus upload_lead_hours).
+YouTube upload step, called by run_pipeline.py when a slot's lead window
+opens (go-live minus upload_lead_hours).
 
-Picks the channel's next unprocessed Drive video, generates metadata with
-Groq, uploads it to YouTube as UNLISTED, makes the Drive file link-shareable
-(needed for Instagram later), and queues it in the channel's publish queue
-with the target go-live time.
+Picks the destination's next unused video from its SOURCE's Drive folder,
+generates metadata with Groq, uploads it to YouTube as UNLISTED, and queues
+it in the destination's publish queue with the target go-live time.
 
-Does NOT touch Instagram — that happens in publisher.py at the go-live
-moment, since Instagram can't be uploaded ahead and held.
+Drive reads use the source's Google login (it owns the folder); the YouTube
+upload uses the destination's login. Instagram is a fully separate step now
+(ig_poster.py) — nothing here shares Drive links.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 from auth import get_credentials
-from config import Channel
+from config import Source, YouTubeDest
 from metadata_generator import generate_metadata
 from telegram_notifier import notify
 from utils import load_json, save_json
@@ -56,15 +56,6 @@ def list_drive_videos(drive, folder_id: str) -> list[dict]:
         if not page_token:
             break
     return [f for f in files if f["mimeType"].startswith("video/")]
-
-
-def make_shareable(drive, file_id: str) -> str:
-    """Grant anyone-with-link viewer access and return a direct-download URL."""
-    drive.permissions().create(
-        fileId=file_id,
-        body={"type": "anyone", "role": "reader"},
-    ).execute()
-    return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 
 def download_video(drive, file_id: str, filename: str) -> str:
@@ -123,71 +114,65 @@ def upload_unlisted_youtube(
 # Entry point
 # ---------------------------------------------------------------------------
 
-def run_upload(channel: Channel, go_live_at: datetime, slot: str) -> bool:
-    """Queue the channel's next video for *slot* going live at *go_live_at*.
+def run_upload(source: Source, yt: YouTubeDest, go_live_at: datetime, slot: str) -> bool:
+    """Queue the YouTube destination's next source video for *slot*.
 
-    Returns True when a video was uploaded and queued, False when the Drive
-    folder has no unprocessed videos left.
+    Drive reads use the SOURCE's Google login (it owns the folder); the
+    YouTube upload uses the DESTINATION's login. Returns True when a video
+    was uploaded and queued, False when the source has no unused videos.
     """
-    creds = get_credentials(channel.google_token)
-    drive = build("drive", "v3", credentials=creds)
-    youtube = build("youtube", "v3", credentials=creds)
+    drive = build("drive", "v3", credentials=get_credentials(source.google_token))
+    youtube = build("youtube", "v3", credentials=get_credentials(yt.google_token))
 
-    log = load_json(channel.log_file, {"processed_file_ids": []})
-    queue = load_json(channel.queue_file, [])
+    log = load_json(yt.log_file, {"processed_file_ids": []})
+    queue = load_json(yt.queue_file, [])
 
-    videos = list_drive_videos(drive, channel.drive_folder_id)
+    videos = list_drive_videos(drive, source.drive_folder_id)
     next_video = next(
         (v for v in videos if v["id"] not in log["processed_file_ids"]), None
     )
 
     if not next_video:
-        logger.info("[%s] No new videos to process.", channel.slug)
+        logger.info("[%s] No new videos in source %s.", yt.id, source.id)
         return False
 
-    logger.info("[%s] Next video: %s", channel.slug, next_video["name"])
+    logger.info("[%s] Next video: %s", yt.id, next_video["name"])
 
-    logger.info("[%s] Generating metadata with Groq...", channel.slug)
-    metadata = generate_metadata(next_video["name"], channel.content_description)
+    logger.info("[%s] Generating metadata with Groq...", yt.id)
+    metadata = generate_metadata(next_video["name"], yt.content_description)
 
-    logger.info("[%s] Downloading from Drive...", channel.slug)
+    logger.info("[%s] Downloading from Drive...", yt.id)
     local_path = download_video(drive, next_video["id"], next_video["name"])
 
     # Critical section: keep cleanup in finally so a partial run never leaves
     # a dangling temp file or a video stuck in limbo.
     try:
-        logger.info("[%s] Uploading to YouTube as unlisted...", channel.slug)
+        logger.info("[%s] Uploading to YouTube as unlisted...", yt.id)
         video_id = upload_unlisted_youtube(
             youtube, local_path,
             metadata["title"], metadata["description"], metadata["tags"],
-            channel.youtube_category_id,
+            yt.category_id,
         )
-        logger.info("[%s]   YouTube video ID: %s", channel.slug, video_id)
-
-        logger.info("[%s] Making Drive file link-shareable for Instagram...", channel.slug)
-        drive_public_url = make_shareable(drive, next_video["id"])
-
-        logger.info("[%s] Queued to go public/live at: %s", channel.slug, go_live_at.isoformat())
+        logger.info("[%s]   YouTube video ID: %s", yt.id, video_id)
+        logger.info("[%s] Queued to go public at: %s", yt.id, go_live_at.isoformat())
 
         queue.append({
             "youtube_video_id": video_id,
             "drive_file_id": next_video["id"],
-            "drive_public_url": drive_public_url,
-            "ig_caption": metadata["ig_caption"],
             "go_live_at": go_live_at.isoformat(),
             "slot": slot,
             "published": False,
         })
-        save_json(channel.queue_file, queue)
+        save_json(yt.queue_file, queue)
 
         log["processed_file_ids"].append(next_video["id"])
-        save_json(channel.log_file, log)
+        save_json(yt.log_file, log)
 
         notify(
-            f"📤 <b>[{channel.display_name}] Queued for {slot}</b>\n"
+            f"📤 <b>[{yt.name}] Queued for {slot}</b>\n"
             f"🎬 {metadata['title']}\n"
             f"👀 Preview (unlisted): https://youtu.be/{video_id}\n"
-            f"🕒 Goes live: {go_live_at.strftime('%d %b, %I:%M %p')}"
+            f"🕒 Goes public: {go_live_at.strftime('%d %b, %I:%M %p')}"
         )
 
     finally:
