@@ -1,59 +1,33 @@
 """
-STEP 1 of the pipeline. Run this 8 hours before a scheduled slot time.
+Upload step of the pipeline, called by run_pipeline.py when a slot's lead
+window opens (go-live minus upload_lead_hours).
 
-Picks the next unprocessed video from Drive, generates metadata with Groq,
-uploads it to YouTube as UNLISTED (visible via link, not searchable), makes
-the Drive file link-shareable (needed for Instagram later), and queues it
-in publish_queue.json with the target public/live time.
+Picks the channel's next unprocessed Drive video, generates metadata with
+Groq, uploads it to YouTube as UNLISTED, makes the Drive file link-shareable
+(needed for Instagram later), and queues it in the channel's publish queue
+with the target go-live time.
 
-Does NOT touch Instagram yet -- that happens in publish_scheduled.py at the
-actual go-live moment, since Instagram can't be uploaded ahead and held.
-
-    python upload_unlisted.py --slot A
-    python upload_unlisted.py --slot B
-
-Slot times are read from .env (SLOT_A_TIME, SLOT_B_TIME, daily, in TIMEZONE).
+Does NOT touch Instagram — that happens in publisher.py at the go-live
+moment, since Instagram can't be uploaded ahead and held.
 """
 
-import argparse
+from __future__ import annotations
+
 import logging
 import os
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
-from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 from auth import get_credentials
+from config import Channel
 from metadata_generator import generate_metadata
 from telegram_notifier import notify
 from utils import load_json, save_json
 
-load_dotenv()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-DRIVE_FOLDER_ID = os.environ["DRIVE_FOLDER_ID"]
-TIMEZONE = os.environ.get("TIMEZONE", "Asia/Kolkata")
-YOUTUBE_CATEGORY_ID = os.environ.get("YOUTUBE_CATEGORY_ID", "22")  # 22 = People & Blogs
-
-SLOT_TIMES = {
-    "A": os.environ.get("SLOT_A_TIME", "17:30"),  # 5:30 PM IST default
-    "B": os.environ.get("SLOT_B_TIME", "21:30"),  # 9:30 PM IST default
-}
-
-LOG_FILE = "processed_log.json"
-QUEUE_FILE = "publish_queue.json"
 TEMP_DIR = "temp_downloads"
 
 
@@ -109,26 +83,16 @@ def download_video(drive, file_id: str, filename: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Scheduling
-# ---------------------------------------------------------------------------
-
-def next_slot_datetime(slot: str) -> datetime:
-    """Return the next occurrence of *slot*'s time in TIMEZONE (tomorrow if already past)."""
-    tz = ZoneInfo(TIMEZONE)
-    now = datetime.now(tz)
-    hour, minute = map(int, SLOT_TIMES[slot].split(":"))
-    target = datetime(now.year, now.month, now.day, hour, minute, tzinfo=tz)
-    if target <= now:
-        target += timedelta(days=1)
-    return target
-
-
-# ---------------------------------------------------------------------------
 # YouTube helpers
 # ---------------------------------------------------------------------------
 
 def upload_unlisted_youtube(
-    youtube, video_path: str, title: str, description: str, tags: list[str]
+    youtube,
+    video_path: str,
+    title: str,
+    description: str,
+    tags: list[str],
+    category_id: str,
 ) -> str:
     """Upload *video_path* as an unlisted video and return the YouTube video ID."""
     body = {
@@ -136,7 +100,7 @@ def upload_unlisted_youtube(
             "title": title,
             "description": description,
             "tags": tags,
-            "categoryId": YOUTUBE_CATEGORY_ID,
+            "categoryId": category_id,
         },
         "status": {
             "privacyStatus": "unlisted",
@@ -156,53 +120,54 @@ def upload_unlisted_youtube(
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Entry point
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Queue a video for a publishing slot.")
-    parser.add_argument("--slot", choices=["A", "B"], required=True, help="Publishing slot (A or B)")
-    args = parser.parse_args()
+def run_upload(channel: Channel, go_live_at: datetime, slot: str) -> bool:
+    """Queue the channel's next video for *slot* going live at *go_live_at*.
 
-    creds = get_credentials()
+    Returns True when a video was uploaded and queued, False when the Drive
+    folder has no unprocessed videos left.
+    """
+    creds = get_credentials(channel.google_token)
     drive = build("drive", "v3", credentials=creds)
     youtube = build("youtube", "v3", credentials=creds)
 
-    log = load_json(LOG_FILE, {"processed_file_ids": []})
-    queue = load_json(QUEUE_FILE, [])
+    log = load_json(channel.log_file, {"processed_file_ids": []})
+    queue = load_json(channel.queue_file, [])
 
-    videos = list_drive_videos(drive, DRIVE_FOLDER_ID)
+    videos = list_drive_videos(drive, channel.drive_folder_id)
     next_video = next(
         (v for v in videos if v["id"] not in log["processed_file_ids"]), None
     )
 
     if not next_video:
-        logger.info("No new videos to process.")
-        return
+        logger.info("[%s] No new videos to process.", channel.slug)
+        return False
 
-    logger.info("Next video: %s", next_video["name"])
+    logger.info("[%s] Next video: %s", channel.slug, next_video["name"])
 
-    logger.info("Generating metadata with Groq...")
-    metadata = generate_metadata(next_video["name"])
+    logger.info("[%s] Generating metadata with Groq...", channel.slug)
+    metadata = generate_metadata(next_video["name"], channel.content_description)
 
-    logger.info("Downloading from Drive...")
+    logger.info("[%s] Downloading from Drive...", channel.slug)
     local_path = download_video(drive, next_video["id"], next_video["name"])
 
     # Critical section: keep cleanup in finally so a partial run never leaves
     # a dangling temp file or a video stuck in limbo.
     try:
-        logger.info("Uploading to YouTube as unlisted...")
+        logger.info("[%s] Uploading to YouTube as unlisted...", channel.slug)
         video_id = upload_unlisted_youtube(
             youtube, local_path,
             metadata["title"], metadata["description"], metadata["tags"],
+            channel.youtube_category_id,
         )
-        logger.info("  YouTube video ID: %s", video_id)
+        logger.info("[%s]   YouTube video ID: %s", channel.slug, video_id)
 
-        logger.info("Making Drive file link-shareable for Instagram...")
+        logger.info("[%s] Making Drive file link-shareable for Instagram...", channel.slug)
         drive_public_url = make_shareable(drive, next_video["id"])
 
-        go_live_at = next_slot_datetime(args.slot)
-        logger.info("Queued to go public/live at: %s", go_live_at.isoformat())
+        logger.info("[%s] Queued to go public/live at: %s", channel.slug, go_live_at.isoformat())
 
         queue.append({
             "youtube_video_id": video_id,
@@ -210,16 +175,16 @@ def main() -> None:
             "drive_public_url": drive_public_url,
             "ig_caption": metadata["ig_caption"],
             "go_live_at": go_live_at.isoformat(),
-            "slot": args.slot,
+            "slot": slot,
             "published": False,
         })
-        save_json(QUEUE_FILE, queue)
+        save_json(channel.queue_file, queue)
 
         log["processed_file_ids"].append(next_video["id"])
-        save_json(LOG_FILE, log)
+        save_json(channel.log_file, log)
 
         notify(
-            f"📤 <b>Queued for slot {args.slot}</b>\n"
+            f"📤 <b>[{channel.display_name}] Queued for {slot}</b>\n"
             f"🎬 {metadata['title']}\n"
             f"👀 Preview (unlisted): https://youtu.be/{video_id}\n"
             f"🕒 Goes live: {go_live_at.strftime('%d %b, %I:%M %p')}"
@@ -231,12 +196,4 @@ def main() -> None:
             os.remove(local_path)
             logger.debug("Removed temp file: %s", local_path)
 
-    logger.info("Done. Video will go public on YouTube and post to Instagram at the scheduled time.")
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as exc:
-        notify(f"🔴 <b>Upload run crashed</b>: {exc}")
-        raise
+    return True

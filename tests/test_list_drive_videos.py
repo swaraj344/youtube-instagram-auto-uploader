@@ -1,12 +1,8 @@
-"""Tests for Drive folder listing in upload_unlisted.py."""
+"""Tests for Drive folder listing in uploader.py."""
 
-import os
 import unittest
 
-os.environ.setdefault("DRIVE_FOLDER_ID", "test-folder")
-os.environ.setdefault("GROQ_API_KEY", "test-key")
-
-from upload_unlisted import list_drive_videos
+from uploader import list_drive_videos
 
 
 class _FakeListRequest:
