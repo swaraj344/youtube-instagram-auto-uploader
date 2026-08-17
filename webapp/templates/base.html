@@ -11,7 +11,9 @@
   <a class="brand" href="{{ url_for('dashboard') }}"><span class="dot"></span>Uploader</a>
   <nav>
     <a href="{{ url_for('dashboard') }}">Dashboard</a>
-    <a href="{{ url_for('new_channel') }}">+ Add channel</a>
+    <a href="{{ url_for('entity_list', section='sources') }}">Sources</a>
+    <a href="{{ url_for('entity_list', section='youtube') }}">YouTube</a>
+    <a href="{{ url_for('entity_list', section='instagram') }}">Instagram</a>
     <a href="{{ url_for('settings') }}">Settings</a>
     <a class="deploy-link" href="{{ url_for('deploy_preview') }}">Deploy</a>
   </nav>

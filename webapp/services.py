@@ -1,9 +1,10 @@
 """
 Filesystem / git / gh / Graph-API plumbing for the local config web app.
 
-Everything operates on the repo this app runs from. GitHub interactions
-shell out to `git` and `gh` (already authenticated on this machine) rather
-than embedding API clients. Nothing here talks to GitHub until deploy().
+Everything operates on the repo this app runs from. Entities live in
+config.json (committed) + secrets/pipeline_secrets.json (gitignored).
+GitHub interactions shell out to `git` and `gh` (already authenticated on
+this machine). Nothing here talks to GitHub until deploy().
 """
 
 from __future__ import annotations
@@ -18,13 +19,14 @@ from zoneinfo import ZoneInfo
 import requests
 from dotenv import dotenv_values, set_key
 
-from config import CHANNELS_FILE, ConfigError, load_channels, validate_config
+from config import CONFIG_FILE, ConfigError, load_config, validate_config
 from utils import load_json, save_json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+SECTIONS = ("sources", "youtube", "instagram")
 SECRETS_DIR = "secrets"
-SECRETS_BASENAME = os.path.join(SECRETS_DIR, "channels_secrets.json")
+SECRETS_BASENAME = os.path.join(SECRETS_DIR, "pipeline_secrets.json")
 FINGERPRINT_BASENAME = os.path.join(SECRETS_DIR, ".deployed.json")
 SHARED_SECRET_KEYS = [
     "META_ACCESS_TOKEN",
@@ -52,12 +54,12 @@ def _run(args, **kw):
 # ---------------------------------------------------------------------------
 
 def read_config() -> dict:
-    return load_json(_p(CHANNELS_FILE), {"channels": []})
+    return load_json(_p(CONFIG_FILE), {"sources": [], "youtube": [], "instagram": []})
 
 
 def write_config(data: dict) -> None:
     validate_config(data)  # raises ConfigError before touching disk
-    save_json(_p(CHANNELS_FILE), data)
+    save_json(_p(CONFIG_FILE), data)
 
 
 def read_secrets_file() -> dict:
@@ -74,79 +76,99 @@ def _env() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Channel CRUD (local only — nothing reaches GitHub until deploy())
+# Entity CRUD (local only — nothing reaches GitHub until deploy())
 # ---------------------------------------------------------------------------
 
-def get_channel(slug: str):
-    raw = next((c for c in read_config()["channels"] if c["slug"] == slug), None)
+def _find(cfg: dict, section: str, eid: str):
+    return next((e for e in cfg.get(section, []) if e["id"] == eid), None)
+
+
+def get_entity(section: str, eid: str):
+    raw = _find(read_config(), section, eid)
     if raw is None:
         return None
-    sec = read_secrets_file().get(slug, {})
+    sec = (read_secrets_file().get(section) or {}).get(eid) or {}
     merged = dict(raw)
-    merged["drive_folder_id"] = sec.get("drive_folder_id", "")
-    merged["ig_business_account_id"] = sec.get("ig_business_account_id", "")
-    merged["youtube_connected"] = bool(sec.get("google_token"))
+    if section == "sources":
+        merged["drive_folder_id"] = sec.get("drive_folder_id", "") or ""
+        merged["google_connected"] = bool(sec.get("google_token"))
+    elif section == "youtube":
+        merged["youtube_connected"] = bool(sec.get("google_token"))
+    else:
+        merged["ig_business_account_id"] = sec.get("ig_business_account_id", "") or ""
     return merged
 
 
-def upsert_channel(slug: str, form, new: bool) -> None:
-    cfg = read_config()
-    existing = next((c for c in cfg["channels"] if c["slug"] == slug), None)
-    if new and existing is not None:
-        raise ConfigError(f"Channel '{slug}' already exists")
-    if not new and existing is None:
-        raise ConfigError(f"No channel '{slug}'")
-
-    try:
-        lead = int(form.get("upload_lead_hours") or 8)
-    except ValueError:
-        raise ConfigError("upload_lead_hours must be a whole number")
-
+def _entry_from_form(section: str, eid: str, form) -> dict:
+    if section == "sources":
+        return {"id": eid, "name": (form.get("name") or "").strip()}
     entry = {
-        "slug": slug,
-        "display_name": (form.get("display_name") or "").strip(),
+        "id": eid,
+        "name": (form.get("name") or "").strip(),
+        "source": (form.get("source") or "").strip(),
         "enabled": form.get("enabled") == "on",
         "timezone": (form.get("timezone") or "Asia/Kolkata").strip(),
         "slots": [s.strip() for s in (form.get("slots") or "").split(",") if s.strip()],
-        "upload_lead_hours": lead,
         "content_description": (form.get("content_description") or "").strip(),
-        "youtube_category_id": (form.get("youtube_category_id") or "22").strip(),
     }
+    if section == "youtube":
+        try:
+            entry["upload_lead_hours"] = int(form.get("upload_lead_hours") or 8)
+        except ValueError:
+            raise ConfigError("upload_lead_hours must be a whole number")
+        entry["category_id"] = (form.get("category_id") or "22").strip()
+    return entry
+
+
+def upsert_entity(section: str, eid: str, form, new: bool) -> None:
+    cfg = read_config()
+    existing = _find(cfg, section, eid)
+    if new and any(_find(cfg, s, eid) for s in SECTIONS):
+        raise ConfigError(f"Id '{eid}' already exists")
+    if not new and existing is None:
+        raise ConfigError(f"No {section} entry '{eid}'")
+
+    entry = _entry_from_form(section, eid, form)
     if existing is not None:
-        cfg["channels"][cfg["channels"].index(existing)] = entry
+        cfg[section][cfg[section].index(existing)] = entry
     else:
-        cfg["channels"].append(entry)
+        cfg.setdefault(section, []).append(entry)
     write_config(cfg)  # validates first; secrets untouched on failure
 
     secrets = read_secrets_file()
-    ch_secrets = secrets.setdefault(slug, {})
-    ch_secrets["drive_folder_id"] = (form.get("drive_folder_id") or "").strip()
-    ch_secrets["ig_business_account_id"] = (
-        form.get("ig_business_account_id") or ""
-    ).strip()
+    sec = secrets.setdefault(section, {}).setdefault(eid, {})
+    if section == "sources":
+        sec["drive_folder_id"] = (form.get("drive_folder_id") or "").strip()
+    elif section == "instagram":
+        sec["ig_business_account_id"] = (form.get("ig_business_account_id") or "").strip()
     write_secrets_file(secrets)
 
 
-def toggle_channel(slug: str) -> None:
+def delete_entity(section: str, eid: str) -> None:
     cfg = read_config()
-    for ch in cfg["channels"]:
-        if ch["slug"] == slug:
-            ch["enabled"] = not ch.get("enabled", True)
-    write_config(cfg)
-
-
-def delete_channel(slug: str) -> None:
-    cfg = read_config()
-    cfg["channels"] = [c for c in cfg["channels"] if c["slug"] != slug]
-    save_json(_p(CHANNELS_FILE), cfg)  # may leave zero channels; that's valid
+    if section == "sources":
+        used = [d["id"] for s in ("youtube", "instagram") for d in cfg.get(s, [])
+                if d.get("source") == eid]
+        if used:
+            raise ConfigError(f"Source '{eid}' is used by: {', '.join(used)}")
+    cfg[section] = [e for e in cfg.get(section, []) if e["id"] != eid]
+    save_json(_p(CONFIG_FILE), cfg)  # may leave zero entities; that's valid
     secrets = read_secrets_file()
-    if slug in secrets:
-        del secrets[slug]
+    if eid in (secrets.get(section) or {}):
+        del secrets[section][eid]
         write_secrets_file(secrets)
 
 
+def toggle_entity(section: str, eid: str) -> None:
+    cfg = read_config()
+    for e in cfg.get(section, []):
+        if e["id"] == eid:
+            e["enabled"] = not e.get("enabled", True)
+    write_config(cfg)
+
+
 # ---------------------------------------------------------------------------
-# Dashboard data
+# Dashboard / list data
 # ---------------------------------------------------------------------------
 
 def refresh_state():
@@ -155,32 +177,49 @@ def refresh_state():
     return None if code == 0 else out
 
 
-def channels_with_status() -> list:
+def list_entities(section: str) -> list:
     from run_pipeline import next_slot_occurrence  # late import avoids cycles
 
     try:
-        channels = load_channels(_p(CHANNELS_FILE), read_secrets_file())
+        cfg = load_config(_p(CONFIG_FILE), read_secrets_file())
     except ConfigError:
         return []
     out = []
-    for ch in channels:
-        queue = load_json(_p(ch.queue_file), [])
-        pending = [q for q in queue if not q.get("published")]
-        recent = [q for q in queue if q.get("published")][-3:]
-        tz = ZoneInfo(ch.timezone)
+    if section == "sources":
+        for src in cfg.sources.values():
+            used = [d.id for d in list(cfg.youtube) + list(cfg.instagram)
+                    if d.source == src.id]
+            out.append({
+                "id": src.id,
+                "name": src.name,
+                "google_connected": bool(src.google_token),
+                "has_folder": bool(src.drive_folder_id),
+                "used_by": used,
+            })
+        return out
+    dests = cfg.youtube if section == "youtube" else cfg.instagram
+    for d in dests:
+        tz = ZoneInfo(d.timezone)
         now = datetime.now(tz)
-        next_slot = min(
-            (next_slot_occurrence(s, tz, now) for s in ch.slots), default=None
-        )
-        out.append(
-            {
-                "ch": ch,
-                "pending": pending,
-                "recent": recent,
-                "next_slot": next_slot,
-                "has_secrets": ch.has_secrets(),
-            }
-        )
+        row = {
+            "id": d.id,
+            "name": d.name,
+            "source": d.source,
+            "enabled": d.enabled,
+            "slots": d.slots,
+            "next_slot": min(
+                (next_slot_occurrence(s, tz, now) for s in d.slots), default=None
+            ),
+            "ready": d.has_secrets() and cfg.sources[d.source].has_secrets(),
+        }
+        if section == "youtube":
+            queue = load_json(_p(d.queue_file), [])
+            row["pending"] = [q for q in queue if not q.get("published")]
+        else:
+            slot_log = load_json(_p(d.slot_log_file), {})
+            posted = sorted(k for k, v in slot_log.items() if v.get("status") == "posted")
+            row["last_posted"] = posted[-1] if posted else None
+        out.append(row)
     return out
 
 
@@ -200,24 +239,29 @@ def meta_token_days():
 # Integrations: Google OAuth, IG account list, workflow dispatch
 # ---------------------------------------------------------------------------
 
-def connect_youtube(slug: str) -> None:
-    """Run the installed-app OAuth flow in the browser; store token locally."""
+def connect_google(section: str, eid: str) -> None:
+    """OAuth for a source (Drive owner) or a YouTube destination."""
+    if section not in ("sources", "youtube"):
+        raise ValueError(f"No Google login for section {section!r}")
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     from auth import SCOPES
 
     secrets = read_secrets_file()
-    client_config = secrets.get(slug, {}).get("google_client_secret") or load_json(
+    sec = (secrets.get(section) or {}).get(eid) or {}
+    client_config = sec.get("google_client_secret") or load_json(
         _p("client_secret.json"), None
     )
     if not client_config:
         raise RuntimeError(
-            "No client_secret.json in the repo root and no per-channel "
-            "client secret configured for this channel."
+            "No client_secret.json in the repo root and no per-entity "
+            "client secret configured."
         )
     flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
     creds = flow.run_local_server(port=0)
-    secrets.setdefault(slug, {})["google_token"] = json.loads(creds.to_json())
+    secrets.setdefault(section, {}).setdefault(eid, {})["google_token"] = json.loads(
+        creds.to_json()
+    )
     write_secrets_file(secrets)
 
 
@@ -246,11 +290,11 @@ def list_ig_accounts() -> list:
     return accounts
 
 
-def trigger_action(slug: str, action: str, upload_slot: str = "") -> None:
-    if action not in ("upload", "publishnow"):
+def trigger_action(target_id: str, action: str, upload_slot: str = "") -> None:
+    if action not in ("upload", "publishnow", "postnow"):
         raise ValueError(f"Unknown action {action!r}")
     code, branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-    fields = ["-f", f"channel={slug}", "-f", f"action={action}"]
+    fields = ["-f", f"target={target_id}", "-f", f"action={action}"]
     if action == "upload":
         fields += ["-f", f"upload_slot={upload_slot}"]
     code, out = _run(
@@ -287,11 +331,11 @@ def _fingerprint(value: str) -> str:
 
 
 def deploy_status() -> dict:
-    _, out = _run(["git", "status", "--porcelain", CHANNELS_FILE])
+    _, out = _run(["git", "status", "--porcelain", CONFIG_FILE, "channels.json", "state"])
     config_dirty = bool(out.strip())
     fp = load_json(_p(FINGERPRINT_BASENAME), {})
     blob = json.dumps(read_secrets_file(), sort_keys=True)
-    secrets_changed = fp.get("channels_secrets") != _fingerprint(blob)
+    secrets_changed = fp.get("pipeline_secrets") != _fingerprint(blob)
     env = _env()
     shared_changed = [
         k
@@ -308,7 +352,11 @@ def deploy_status() -> dict:
 
 
 def deploy_plan() -> dict:
-    _, diff = _run(["git", "diff", CHANNELS_FILE])
+    # --stat because a migration deletes/creates many state files; a full
+    # diff would be noise.
+    _, diff = _run(
+        ["git", "diff", "HEAD", "--stat", "--", CONFIG_FILE, "channels.json", "state"]
+    )
     return {"status": deploy_status(), "config_diff": diff}
 
 
@@ -319,24 +367,20 @@ def deploy() -> list:
     fp = load_json(_p(FINGERPRINT_BASENAME), {})
 
     if status["config_dirty"]:
-        _run(["git", "add", CHANNELS_FILE])
-        code, out = _run(["git", "commit", "-m", "Update channel config via web UI"])
+        _run(["git", "add", CONFIG_FILE, "channels.json", "state"])
+        code, out = _run(["git", "commit", "-m", "Update pipeline config via web UI"])
         if code == 0:
             code, out = _run(["git", "push"])
-        results.append(
-            "channels.json: pushed" if code == 0 else f"channels.json FAILED: {out}"
-        )
+        results.append("config: pushed" if code == 0 else f"config FAILED: {out}")
 
     if status["secrets_changed"]:
         blob = json.dumps(read_secrets_file(), sort_keys=True)
-        code, out = _run(
-            ["gh", "secret", "set", "CHANNELS_SECRETS_JSON"], input=blob
-        )
+        code, out = _run(["gh", "secret", "set", "PIPELINE_SECRETS_JSON"], input=blob)
         if code == 0:
-            fp["channels_secrets"] = _fingerprint(blob)
-            results.append("CHANNELS_SECRETS_JSON: updated")
+            fp["pipeline_secrets"] = _fingerprint(blob)
+            results.append("PIPELINE_SECRETS_JSON: updated")
         else:
-            results.append(f"CHANNELS_SECRETS_JSON FAILED: {out}")
+            results.append(f"PIPELINE_SECRETS_JSON FAILED: {out}")
 
     env = _env()
     for key in status["shared_changed"]:
@@ -354,40 +398,16 @@ def deploy() -> list:
 
 
 # ---------------------------------------------------------------------------
-# Legacy import (single-channel .env/token.json era -> secrets blob)
+# Legacy migration (channel model -> sources/destinations)
 # ---------------------------------------------------------------------------
 
-def _import_target():
-    """First configured channel that has no google_token yet, or None."""
-    secrets = read_secrets_file()
-    for ch in read_config()["channels"]:
-        if not secrets.get(ch["slug"], {}).get("google_token"):
-            return ch["slug"]
-    return None
+def migration_available() -> bool:
+    import migration
+
+    return migration.migration_available(ROOT)
 
 
-def legacy_import_available() -> bool:
-    return os.path.exists(_p("token.json")) and _import_target() is not None
+def run_migration() -> str:
+    import migration
 
-
-def run_legacy_import() -> str:
-    slug = _import_target()
-    if slug is None:
-        raise RuntimeError("Every configured channel already has a Google token.")
-    if not os.path.exists(_p("token.json")):
-        raise RuntimeError("token.json not found in the repo root.")
-    with open(_p("token.json"), encoding="utf-8") as fh:
-        token = json.load(fh)
-    env = _env()
-    secrets = read_secrets_file()
-    entry = secrets.setdefault(slug, {})
-    if not entry.get("drive_folder_id"):
-        entry["drive_folder_id"] = (env.get("DRIVE_FOLDER_ID") or "").strip()
-    if not entry.get("ig_business_account_id"):
-        entry["ig_business_account_id"] = (env.get("IG_BUSINESS_ACCOUNT_ID") or "").strip()
-    entry["google_token"] = token
-    write_secrets_file(secrets)
-    return (
-        f"Imported legacy .env/token.json into secrets for channel '{slug}'. "
-        "Review, then Deploy to push CHANNELS_SECRETS_JSON to GitHub."
-    )
+    return migration.migrate(ROOT)

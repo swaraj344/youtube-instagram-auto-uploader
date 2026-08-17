@@ -18,23 +18,23 @@ on:
   # Manual trigger — used by the Actions tab, the Telegram bot, and the web app
   workflow_dispatch:
     inputs:
-      channel:
-        description: "Channel slug (required for action=upload/publishnow)"
+      target:
+        description: "Destination id (required for action=upload/publishnow/postnow)"
         required: false
         default: ""
       action:
-        description: "upload | publishnow | blank = normal pass"
+        description: "upload | publishnow | postnow | blank = normal pass"
         required: false
         default: ""
       upload_slot:
-        description: "HH:MM go-live slot for action=upload (blank = channel's first slot)"
+        description: "HH:MM go-live slot for action=upload (blank = first slot)"
         required: false
         default: ""
 
 env:
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-  CHANNELS_SECRETS_JSON: ${{ secrets.CHANNELS_SECRETS_JSON }}
+  PIPELINE_SECRETS_JSON: ${{ secrets.PIPELINE_SECRETS_JSON }}
   META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
   GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
 
@@ -63,15 +63,21 @@ jobs:
       - name: Manual upload
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'upload'
         env:
-          CHANNEL: ${{ github.event.inputs.channel }}
+          TARGET: ${{ github.event.inputs.target }}
           UPLOAD_SLOT: ${{ github.event.inputs.upload_slot }}
-        run: python run_pipeline.py --channel "$CHANNEL" --upload-slot "$UPLOAD_SLOT"
+        run: python run_pipeline.py --target "$TARGET" --upload-slot "$UPLOAD_SLOT"
 
       - name: Manual publish-now
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'publishnow'
         env:
-          CHANNEL: ${{ github.event.inputs.channel }}
-        run: python run_pipeline.py --channel "$CHANNEL" --force-next
+          TARGET: ${{ github.event.inputs.target }}
+        run: python run_pipeline.py --target "$TARGET" --force-next
+
+      - name: Manual Instagram post-now
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'postnow'
+        env:
+          TARGET: ${{ github.event.inputs.target }}
+        run: python run_pipeline.py --target "$TARGET" --post-now
 
       - name: Check Meta token expiry
         if: github.event.schedule == '30 3 * * *'
