@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import threading
 from datetime import datetime
@@ -435,18 +436,48 @@ def _drive_for(token_info: dict):
     return gbuild("drive", "v3", credentials=get_credentials(token_info))
 
 
-def start_upload(source_id: str, folder: str) -> None:
-    """Validate, then upload *folder*'s videos to the source's Drive folder
-    in a background thread. Raises RuntimeError on anything the user must fix."""
+def _check_job_free(source_id: str) -> None:
     job = _upload_jobs.get(source_id)
     if job and job.get("status") == "running":
-        raise RuntimeError("An upload is already running for this source.")
-    folder = os.path.expanduser((folder or "").strip())
-    if not os.path.isdir(folder):
-        raise RuntimeError(f"Not a folder: {folder or '(empty)'}")
+        raise RuntimeError("An upload/import is already running for this source.")
+
+
+def _check_google_connected(source_id: str) -> None:
     sec = (read_secrets_file().get("sources") or {}).get(source_id) or {}
     if not sec.get("google_token"):
         raise RuntimeError("Connect Google for this source first (it owns the Drive folder).")
+
+
+def _ensure_dest_folder(drive, source_id: str, state: dict) -> str:
+    """Return the source's Drive folder id, creating the folder on first use."""
+    secrets = read_secrets_file()
+    sec = secrets["sources"][source_id]
+    folder_id = (sec.get("drive_folder_id") or "").strip()
+    if folder_id:
+        return folder_id
+    src = next(
+        (s for s in read_config().get("sources", []) if s["id"] == source_id), None
+    )
+    name = (src or {}).get("name", source_id)
+    created = drive.files().create(
+        body={"name": name, "mimeType": "application/vnd.google-apps.folder"},
+        fields="id",
+    ).execute()
+    folder_id = created["id"]
+    secrets["sources"][source_id]["drive_folder_id"] = folder_id
+    write_secrets_file(secrets)
+    state["created_folder"] = True
+    return folder_id
+
+
+def start_upload(source_id: str, folder: str) -> None:
+    """Validate, then upload *folder*'s videos to the source's Drive folder
+    in a background thread. Raises RuntimeError on anything the user must fix."""
+    _check_job_free(source_id)
+    folder = os.path.expanduser((folder or "").strip())
+    if not os.path.isdir(folder):
+        raise RuntimeError(f"Not a folder: {folder or '(empty)'}")
+    _check_google_connected(source_id)
     files = sorted(
         f for f in os.listdir(folder)
         if f.lower().endswith(VIDEO_EXTENSIONS)
@@ -458,7 +489,7 @@ def start_upload(source_id: str, folder: str) -> None:
         )
 
     state = {
-        "status": "running", "folder": folder, "total": len(files),
+        "status": "running", "mode": "upload", "folder": folder, "total": len(files),
         "done": 0, "uploaded": 0, "skipped": 0, "failed": 0,
         "current": "", "current_pct": 0, "error": None,
     }
@@ -474,27 +505,9 @@ def _upload_worker(source_id: str, folder: str, files: list, state: dict) -> Non
 
         from uploader import list_drive_videos
 
-        secrets = read_secrets_file()
-        sec = secrets["sources"][source_id]
+        sec = read_secrets_file()["sources"][source_id]
         drive = _drive_for(sec["google_token"])
-
-        folder_id = (sec.get("drive_folder_id") or "").strip()
-        if not folder_id:
-            # First upload for a fresh source: create its Drive folder and
-            # remember the id (deploy pushes it with the secrets blob).
-            src = next(
-                (s for s in read_config().get("sources", []) if s["id"] == source_id),
-                None,
-            )
-            name = (src or {}).get("name", source_id)
-            created = drive.files().create(
-                body={"name": name, "mimeType": "application/vnd.google-apps.folder"},
-                fields="id",
-            ).execute()
-            folder_id = created["id"]
-            secrets["sources"][source_id]["drive_folder_id"] = folder_id
-            write_secrets_file(secrets)
-            state["created_folder"] = True
+        folder_id = _ensure_dest_folder(drive, source_id, state)
 
         existing = {f["name"] for f in list_drive_videos(drive, folder_id)}
 
@@ -529,6 +542,92 @@ def _upload_worker(source_id: str, folder: str, files: list, state: dict) -> Non
 
         state["current"] = ""
         state["current_pct"] = 0
+        state["status"] = "done"
+    except Exception as exc:
+        state["status"] = "error"
+        state["error"] = str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Shared Drive link -> own Drive import (server-side copy, no local transfer)
+# ---------------------------------------------------------------------------
+
+_DRIVE_FOLDER_LINK_RE = re.compile(r"/folders/([A-Za-z0-9_-]+)")
+
+
+def parse_drive_folder_link(link: str):
+    """Extract a folder id from a Drive folder URL (or accept a bare id)."""
+    link = (link or "").strip()
+    m = _DRIVE_FOLDER_LINK_RE.search(link)
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9_-]{10,}", link):
+        return link
+    return None
+
+
+def start_import(source_id: str, link: str) -> None:
+    """Server-side copy every video from a shared Drive folder into the
+    source's own folder, in a background thread."""
+    _check_job_free(source_id)
+    shared_id = parse_drive_folder_link(link)
+    if not shared_id:
+        raise RuntimeError(
+            "That doesn't look like a Drive folder link "
+            "(expected https://drive.google.com/drive/folders/…)."
+        )
+    _check_google_connected(source_id)
+
+    state = {
+        "status": "running", "mode": "import", "link": link, "total": 0,
+        "done": 0, "uploaded": 0, "skipped": 0, "failed": 0,
+        "current": "listing shared folder…", "current_pct": 0, "error": None,
+    }
+    _upload_jobs[source_id] = state
+    threading.Thread(
+        target=_import_worker, args=(source_id, shared_id, state), daemon=True
+    ).start()
+
+
+def _import_worker(source_id: str, shared_id: str, state: dict) -> None:
+    try:
+        from uploader import list_drive_videos
+
+        sec = read_secrets_file()["sources"][source_id]
+        drive = _drive_for(sec["google_token"])
+        dest_id = _ensure_dest_folder(drive, source_id, state)
+
+        videos = list_drive_videos(drive, shared_id)
+        if not videos:
+            state["status"] = "error"
+            state["error"] = (
+                "No videos found — the link may be wrong, not shared with "
+                "your account, or the folder is empty."
+            )
+            return
+        existing = {f["name"] for f in list_drive_videos(drive, dest_id)}
+        state["total"] = len(videos)
+
+        for video in videos:
+            state["current"] = video["name"]
+            if video["name"] in existing:
+                state["skipped"] += 1
+                state["done"] += 1
+                continue
+            try:
+                drive.files().copy(
+                    fileId=video["id"],
+                    body={"name": video["name"], "parents": [dest_id]},
+                    fields="id",
+                ).execute()
+            except Exception as exc:
+                state["failed"] += 1
+                state.setdefault("errors", []).append(f"{video['name']}: {exc}")
+            else:
+                state["uploaded"] += 1
+            state["done"] += 1
+
+        state["current"] = ""
         state["status"] = "done"
     except Exception as exc:
         state["status"] = "error"

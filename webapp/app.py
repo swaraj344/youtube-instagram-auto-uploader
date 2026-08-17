@@ -154,6 +154,15 @@ def create_app() -> Flask:
             flash(f"Upload not started: {exc}", "error")
         return redirect(url_for("edit_entity", section="sources", eid=eid))
 
+    @app.post("/sources/<eid>/import")
+    def start_source_import(eid):
+        try:
+            services.start_import(eid, request.form.get("drive_link", ""))
+            flash("Import started — progress shows below.", "ok")
+        except Exception as exc:
+            flash(f"Import not started: {exc}", "error")
+        return redirect(url_for("edit_entity", section="sources", eid=eid))
+
     @app.get("/api/sources/<eid>/upload-status")
     def source_upload_status(eid):
         return jsonify(services.upload_status(eid) or {"status": "idle"})

@@ -96,6 +96,19 @@
     </label>
     <p><button type="submit" class="primary">Upload to Drive</button></p>
   </form>
+
+  <h2>…or import from a shared Drive link</h2>
+  <p class="dim">Paste a shared folder link — videos are copied straight into
+     your Drive on Google's servers (nothing downloads to this Mac). Videos
+     already in your folder are skipped.</p>
+  <form method="post" class="stack" action="{{ url_for('start_source_import', eid=e.id) }}">
+    <label>Shared folder link
+      <input name="drive_link" class="mono"
+             placeholder="https://drive.google.com/drive/folders/…">
+    </label>
+    <p><button type="submit" class="primary">Import to my Drive</button></p>
+  </form>
+
   <div id="upload-progress" hidden>
     <p id="upload-summary"></p>
     <div class="progress"><i id="upload-bar"></i></div>
@@ -118,9 +131,11 @@ async function pollUpload() {
   box.hidden = false;
   const pct = s.total ? Math.round(100 * s.done / s.total) : 0;
   document.getElementById('upload-bar').style.width = pct + '%';
-  const label = {running: '⏫ Uploading', done: '✅ Finished', error: '🔴 Failed'}[s.status] || s.status;
+  const verb = s.mode === 'import' ? 'copied' : 'uploaded';
+  const label = {running: s.mode === 'import' ? '⏫ Importing' : '⏫ Uploading',
+                 done: '✅ Finished', error: '🔴 Failed'}[s.status] || s.status;
   document.getElementById('upload-summary').textContent =
-    `${label}: ${s.done}/${s.total} files — ${s.uploaded || 0} uploaded, ` +
+    `${label}: ${s.done}/${s.total} files — ${s.uploaded || 0} ${verb}, ` +
     `${s.skipped || 0} already in Drive` +
     (s.failed ? `, ${s.failed} failed` : '') +
     (s.error ? ` — ${s.error}` : '');

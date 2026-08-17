@@ -87,6 +87,17 @@ class RouteTest(unittest.TestCase):
             resp = self.client.get("/api/sources/study-drive/upload-status")
         self.assertEqual(resp.get_json()["status"], "idle")
 
+    def test_start_import_route(self):
+        with patch.object(webapp_app.services, "start_import") as start:
+            resp = self.client.post(
+                "/sources/study-drive/import",
+                data={"drive_link": "https://drive.google.com/drive/folders/abc123def"},
+            )
+        self.assertEqual(resp.status_code, 302)
+        start.assert_called_once_with(
+            "study-drive", "https://drive.google.com/drive/folders/abc123def"
+        )
+
     def test_pick_folder_route(self):
         with patch.object(webapp_app.services, "pick_local_folder",
                           return_value="/Users/x/Videos/"):
