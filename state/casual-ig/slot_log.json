@@ -8,11 +8,13 @@
     "note": "covered by legacy pipeline before migration"
   },
   "2026-08-18 17:30": {
-    "status": "failed",
-    "failure_notified": true
+    "status": "posted",
+    "media_id": "18111761410791938",
+    "video": "apricity_studies_0fbdad885aa54dbd87cec3a98117f815.mp4"
   },
   "2026-08-18 21:30": {
-    "status": "failed",
-    "failure_notified": true
+    "status": "posted",
+    "media_id": "18160001125468930",
+    "video": "apricity_studies_10025b5d5c794f499c4016946c504629.mp4"
   }
 }
