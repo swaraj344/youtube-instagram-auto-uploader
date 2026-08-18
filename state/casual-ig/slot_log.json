@@ -6,5 +6,13 @@
   "2026-08-17 21:30": {
     "status": "posted",
     "note": "covered by legacy pipeline before migration"
+  },
+  "2026-08-18 17:30": {
+    "status": "failed",
+    "failure_notified": true
+  },
+  "2026-08-18 21:30": {
+    "status": "failed",
+    "failure_notified": true
   }
 }
