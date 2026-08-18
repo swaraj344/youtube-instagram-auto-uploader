@@ -21,7 +21,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-GROQ_MODEL = "llama-3.3-70b-versatile"  # strong, fast, free-tier friendly
+# Overridable via env so the next Groq model retirement is a secret-flip,
+# not a code change (llama-3.3-70b-versatile was retired 2026-08-18).
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip()
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
@@ -55,7 +57,10 @@ def _call_groq(system_prompt: str, user_prompt: str) -> str:
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.7,
-        "max_tokens": 500,
+        # Reasoning models (gpt-oss) spend tokens thinking before the JSON
+        # comes out; a small cap starves them and Groq 400s with
+        # json_validate_failed. 2048 leaves room for both.
+        "max_tokens": 2048,
         "response_format": {"type": "json_object"},
     }
 
