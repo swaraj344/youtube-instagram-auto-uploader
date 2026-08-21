@@ -89,5 +89,12 @@
     "go_live_at": "2026-08-20T21:30:00+05:30",
     "slot": "21:30",
     "published": true
+  },
+  {
+    "youtube_video_id": "NWgLQqNf0J8",
+    "drive_file_id": "1XSEI0utIYwFRySx-5KRdb0C97_3LCkxF",
+    "go_live_at": "2026-08-21T17:30:00+05:30",
+    "slot": "17:30",
+    "published": false
   }
 ]
