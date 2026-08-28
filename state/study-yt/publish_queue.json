@@ -186,13 +186,13 @@
     "drive_file_id": "1F7sMH7l3zG-ES6leYtib1OibHSZJl27Y",
     "go_live_at": "2026-08-28T17:30:00+05:30",
     "slot": "17:30",
-    "published": false
+    "published": true
   },
   {
     "youtube_video_id": "Hjs9ERLhhbQ",
     "drive_file_id": "1rXIHAP97j6rjS0nH_VSIhWall4i1_76W",
     "go_live_at": "2026-08-28T21:30:00+05:30",
     "slot": "21:30",
-    "published": false
+    "published": true
   }
 ]
