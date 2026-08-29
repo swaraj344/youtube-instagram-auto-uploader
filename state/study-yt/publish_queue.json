@@ -194,5 +194,19 @@
     "go_live_at": "2026-08-28T21:30:00+05:30",
     "slot": "21:30",
     "published": true
+  },
+  {
+    "youtube_video_id": "Pxa8Ed5Q4fs",
+    "drive_file_id": "1abGPWysaKCzmn4MOhu0S4cyWlQVKJQIL",
+    "go_live_at": "2026-08-29T17:30:00+05:30",
+    "slot": "17:30",
+    "published": false
+  },
+  {
+    "youtube_video_id": "mzo0Pk8_CVE",
+    "drive_file_id": "1uNA9rozbfoQo8PseN9eW5fDMmQHHLQLg",
+    "go_live_at": "2026-08-29T21:30:00+05:30",
+    "slot": "21:30",
+    "published": false
   }
 ]
