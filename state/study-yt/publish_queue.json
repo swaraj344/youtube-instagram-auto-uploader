@@ -243,5 +243,12 @@
     "go_live_at": "2026-09-01T17:30:00+05:30",
     "slot": "17:30",
     "published": false
+  },
+  {
+    "youtube_video_id": "xTxjQW2j8a8",
+    "drive_file_id": "115onZanifZjXDxFXzMHLVNXj2OH6i6M7",
+    "go_live_at": "2026-09-01T21:30:00+05:30",
+    "slot": "21:30",
+    "published": false
   }
 ]
