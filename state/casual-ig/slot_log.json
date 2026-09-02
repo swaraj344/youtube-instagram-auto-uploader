@@ -156,5 +156,9 @@
     "status": "posted",
     "media_id": "18350602246170274",
     "video": "apricity_studies_53d297ec38ec4b5e8c3059df3fc4f5eb.mp4"
+  },
+  "2026-09-02 17:30": {
+    "status": "failed",
+    "failure_notified": true
   }
 }
